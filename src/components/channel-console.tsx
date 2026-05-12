@@ -134,8 +134,7 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   } | null>(null);
   const [applying, setApplying] = useState(false);
   const [agentBusy, setAgentBusy] = useState(false);
-  const narrateTimerRef = useRef<number | null>(null);
-  const narratedItemsRef = useRef<Set<string>>(new Set());
+  const directorBusyRef = useRef(false);
 
   const active = useMemo(
     () => channels.find((channel) => channel.id === activeId) ?? channels[0] ?? null,
@@ -260,8 +259,46 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     setPlayIndex(0);
     setSegmentStartedAt(Date.now());
     setNow(Date.now());
-    narratedItemsRef.current = new Set();
   }, [active?.id, active?.activeSpecVersion.id, itemKey]);
+
+  const provider = apiKeyProviders[0] as "ANTHROPIC" | "OPENAI" | undefined;
+  const agentDriven = !!provider;
+
+  const recentlyShownIds = useMemo<string[]>(() => {
+    if (!active) return [];
+    return (active.narrationMessages ?? [])
+      .map((m) => m.metadata?.chosenItemId)
+      .filter((id): id is string => !!id)
+      .slice(0, 8);
+  }, [active?.narrationMessages]);
+
+  const fireDirector = useCallback(
+    async (recent: string[]) => {
+      if (!active || !provider || items.length === 0) return;
+      if (directorBusyRef.current) return;
+      directorBusyRef.current = true;
+      try {
+        const payload = items.map((it) => ({
+          id: it.id,
+          title: it.title,
+          summary: it.summary || null,
+          link: it.link || null,
+          sourceLabel: it.source || null,
+        }));
+        const token = await auth.getToken();
+        await narrateChannel(active.id, provider, payload, recent, token);
+        setNarrationKeyHint(null);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/MISSING_API_KEY/i.test(message) || /no api key/i.test(message)) {
+          setNarrationKeyHint("Configure an API key in Settings to enable narration.");
+        }
+      } finally {
+        directorBusyRef.current = false;
+      }
+    },
+    [active?.id, provider, items, auth],
+  );
 
   // Load configured api-key providers once on auth-ready; refresh after slice-D mutations.
   useEffect(() => {
@@ -281,62 +318,62 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     };
   }, [auth, auth.authenticated, auth.ready]);
 
-  // Trigger narrateChannel ~3s after the broadcast advances to a new item.
-  useEffect(() => {
-    if (!active || !currentItem) return;
-    const provider = apiKeyProviders[0];
-    if (!provider) {
-      if (apiKeyProviders.length === 0) setNarrationKeyHint("Configure an API key in Settings to enable narration.");
-      return;
-    }
-    if (narratedItemsRef.current.has(currentItem.id)) return;
-
-    if (narrateTimerRef.current !== null) {
-      window.clearTimeout(narrateTimerRef.current);
-    }
-    const targetItemId = currentItem.id;
-    const channelId = active.id;
-    const items = [
-      {
-        title: currentItem.title,
-        summary: currentItem.summary || null,
-        link: currentItem.link || null,
-        sourceLabel: currentItem.source || null,
-      },
-    ];
-    narrateTimerRef.current = window.setTimeout(async () => {
-      narrateTimerRef.current = null;
-      if (narratedItemsRef.current.has(targetItemId)) return;
-      narratedItemsRef.current.add(targetItemId);
-      try {
-        const token = await auth.getToken();
-        await narrateChannel(channelId, provider as "ANTHROPIC" | "OPENAI", items, token);
-        setNarrationKeyHint(null);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (/MISSING_API_KEY/i.test(message) || /no api key/i.test(message)) {
-          setNarrationKeyHint("Configure an API key in Settings to enable narration.");
-        }
-        // Allow retry on next advance.
-        narratedItemsRef.current.delete(targetItemId);
-      }
-    }, 3_000);
-
-    return () => {
-      if (narrateTimerRef.current !== null) {
-        window.clearTimeout(narrateTimerRef.current);
-        narrateTimerRef.current = null;
-      }
-    };
-  }, [active?.id, apiKeyProviders, auth, currentItem?.id]);
-
   const latestNarration = useMemo(
     () => (active ? latestNarrationFor(active.narrationMessages) : null),
     [active?.narrationMessages],
   );
 
+  // Surface a key-missing hint when the agent can't run yet.
   useEffect(() => {
-    if (items.length === 0) return;
+    if (agentDriven) {
+      setNarrationKeyHint(null);
+    } else if (apiKeyProviders.length === 0) {
+      setNarrationKeyHint("Configure an API key in Settings to enable narration.");
+    }
+  }, [agentDriven, apiKeyProviders.length]);
+
+  // Agent-driven scene controller: jump to the chosenItemId on every new
+  // narration message, then schedule the next director call once the current
+  // narration has likely played out. Falls back to the simple auto-cycler
+  // below when no API key is configured.
+  useEffect(() => {
+    if (!agentDriven || !active || items.length === 0) return;
+
+    if (!latestNarration) {
+      // No narration yet — kick off the first scene.
+      void fireDirector([]);
+      return;
+    }
+
+    const chosenId = latestNarration.metadata?.chosenItemId;
+    if (chosenId) {
+      const idx = items.findIndex((it) => it.id === chosenId);
+      if (idx >= 0 && idx !== playIndex) {
+        setPlayIndex(idx);
+        setSegmentStartedAt(Date.now());
+      }
+    }
+
+    // Roughly model "narration is done speaking" via text length: ~55ms/char,
+    // clamped to [8s, 30s]. If the message is already older than that, advance
+    // very soon.
+    const speakMs = Math.min(30_000, Math.max(8_000, latestNarration.text.length * 55));
+    const elapsedMs = Date.now() - Date.parse(latestNarration.createdAt);
+    const remainingMs = Math.max(800, speakMs - elapsedMs);
+
+    const timer = window.setTimeout(() => {
+      const recentForNext = chosenId
+        ? [chosenId, ...recentlyShownIds.filter((id) => id !== chosenId)].slice(0, 8)
+        : recentlyShownIds;
+      void fireDirector(recentForNext);
+    }, remainingMs);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.id, items, latestNarration?.id, agentDriven, fireDirector]);
+
+  // Auto-cycler — only runs as a fallback when the agent isn't driving.
+  useEffect(() => {
+    if (agentDriven || items.length === 0) return;
     const id = window.setInterval(() => {
       const nextNow = Date.now();
       setNow(nextNow);
@@ -346,7 +383,7 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
       }
     }, TICK_MS);
     return () => window.clearInterval(id);
-  }, [durationSeconds, items.length, segmentStartedAt]);
+  }, [agentDriven, durationSeconds, items.length, segmentStartedAt]);
 
   async function chooseFocus(option: FocusOption) {
     if (!active || pendingFocus || pendingPreview) return;

@@ -51,7 +51,7 @@ export const CHANNEL_FIELDS = `
     createdAt
   }
   agentJobs { id status prompt error mutationId createdAt updatedAt }
-  narrationMessages(limit: 8) { id text source createdAt }
+  narrationMessages(limit: 8) { id text source createdAt metadata }
   dataSourcesData {
     sourceId
     sourceType
@@ -301,7 +301,7 @@ export function subscribeChannelNarration(
   return subscribe<ChannelNarrationPayload>(
     `
       subscription ChannelNarration($channelId: ID!) {
-        channelNarration(channelId: $channelId) { id text source createdAt }
+        channelNarration(channelId: $channelId) { id text source createdAt metadata }
       }
     `,
     { channelId },
@@ -339,7 +339,8 @@ export function subscribeChannelAgentJobUpdated(
 export async function narrateChannel(
   channelId: string,
   provider: "ANTHROPIC" | "OPENAI",
-  items: Array<{ title: string; summary?: string | null; link?: string | null; sourceLabel?: string | null }>,
+  items: Array<{ id: string; title: string; summary?: string | null; link?: string | null; sourceLabel?: string | null }>,
+  recentlyShown: string[],
   token?: string | null,
 ) {
   return graphql<{ narrateChannel: string }>(
@@ -348,11 +349,17 @@ export async function narrateChannel(
         $channelId: ID!
         $provider: NarratorProvider!
         $items: [NarrationItemInput!]!
+        $recentlyShown: [String!]
       ) {
-        narrateChannel(channelId: $channelId, provider: $provider, items: $items)
+        narrateChannel(
+          channelId: $channelId
+          provider: $provider
+          items: $items
+          recentlyShown: $recentlyShown
+        )
       }
     `,
-    { channelId, provider, items },
+    { channelId, provider, items, recentlyShown },
     token,
   );
 }

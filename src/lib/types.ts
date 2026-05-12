@@ -101,6 +101,7 @@ export type ChannelNarrationMessage = {
   text: string;
   source: string;
   createdAt: string;
+  metadata?: { chosenItemId?: string; jobId?: string; provider?: string; itemCount?: number } | null;
 };
 
 export type ChannelDataSourceData = {
