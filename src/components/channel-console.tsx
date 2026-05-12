@@ -69,8 +69,8 @@ type FocusOption = {
   prompt: string;
   kind:
     | "news-world"
-    | "news-new-york"
-    | "news-traffic"
+    | "news-europe"
+    | "news-iran"
     | "market-btc"
     | "market-eth"
     | "market-sol";
@@ -860,13 +860,20 @@ function ShellState({ icon, title }: { icon: React.ReactNode; title: string }) {
 }
 
 function extractBroadcastItems(channel: Channel): BroadcastItem[] {
-  // Honor the channel's declared playout source (typically `filtered_wire`,
-  // which the keyword-filter plugin has already curated server-side). Only
-  // re-apply the client-side news focus when we're reading from the raw wire.
-  const dataSource = preferredSource(channel);
+  // For news channels, the keyword-filter component currently doesn't receive
+  // spec constraints — `filtered_wire`'s server-side output is effectively the
+  // same as `wire`. We read raw wire items and apply `applyNewsFocus` on the
+  // client using the spec's declared include/exclude/region, so the focus
+  // switcher actually narrows the broadcast. Backend constraint propagation
+  // is a separate slice.
+  const dataSource =
+    channel.spec.channelType === "news"
+      ? (channel.dataSourcesData.find((s) => s.sourceId === "wire" && !s.error) ??
+        preferredSource(channel))
+      : preferredSource(channel);
   const rawItems = getPayloadItems(dataSource?.data);
   const filtered =
-    channel.spec.channelType === "news" && dataSource?.sourceId === "wire"
+    channel.spec.channelType === "news"
       ? applyNewsFocus(channel, rawItems)
       : rawItems;
   const limit = clampNumber(channel.spec.playout?.limit ?? 100, 1, 250);
@@ -951,8 +958,31 @@ function readConstraintString(value: unknown): string {
 }
 
 function regionTermsFor(region: string): string[] {
-  if (["new-york-city", "nyc", "new york"].includes(region)) {
-    return ["new york", "nyc", "manhattan", "brooklyn", "queens", "bronx", "staten island"];
+  if (region === "europe") {
+    return [
+      "europe",
+      "european",
+      "eu ",
+      "nato",
+      "france",
+      "germany",
+      "uk",
+      "britain",
+      "spain",
+      "italy",
+      "poland",
+      "netherlands",
+      "brussels",
+      "berlin",
+      "paris",
+      "madrid",
+      "rome",
+      "london",
+      "warsaw",
+    ];
+  }
+  if (region === "iran") {
+    return ["iran", "iranian", "tehran", "khamenei", "irgc"];
   }
   return [region.replace(/-/g, " ")];
 }
@@ -1000,18 +1030,18 @@ function focusOptionsForChannel(channel: Channel): FocusOption[] {
           "Make this a broad world news channel again. Set the news region to global, clear keyword include and exclude filters, keep the simple broadcast presentation, and keep story rotation readable for a general viewer.",
       },
       {
-        label: "New York",
-        hint: "Focus the channel on New York City.",
-        kind: "news-new-york",
+        label: "Europe",
+        hint: "Focus the channel on European news.",
+        kind: "news-europe",
         prompt:
-          "Focus this news channel on New York City. Update the news source and keyword filter toward NYC, New York, Manhattan, Brooklyn, Queens, city agencies, transit, weather, public safety, and local policy. Keep the UI as a simple viewer-facing broadcast.",
+          "Focus this news channel on Europe. Update the news source and keyword filter toward Europe, EU, NATO, France, Germany, UK, Britain, Spain, Italy, Poland, the Netherlands, Brussels, and major European capitals. Keep the UI as a simple viewer-facing broadcast.",
       },
       {
-        label: "Traffic",
-        hint: "Follow traffic, roads, and violations.",
-        kind: "news-traffic",
+        label: "Iran",
+        hint: "Follow Iran and the wider region.",
+        kind: "news-iran",
         prompt:
-          "Focus this news channel on NYC traffic and enforcement. Prioritize stories about traffic violations, parking, speed cameras, congestion pricing, MTA delays, road closures, crashes, bridges, tunnels, and city transportation enforcement. Keep the UI as a simple viewer-facing broadcast.",
+          "Focus this news channel on Iran. Prioritize stories about Iran, Tehran, the IRGC, Iranian leadership, sanctions, the Persian Gulf, and Iran's relationships with neighbors and the US. Keep the UI as a simple viewer-facing broadcast.",
       },
     ];
   }
@@ -1103,23 +1133,54 @@ function buildFocusPatch(channel: Channel, option: FocusOption): Partial<Channel
 }
 
 function newsFocusConstraints(kind: FocusOption["kind"]) {
-  if (kind === "news-new-york") {
+  if (kind === "news-europe") {
     return {
-      title: "New York Watch",
-      region: "new-york-city",
-      topic: "local news",
-      include: [["New York", "NYC", "Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island", "MTA", "City Hall"]],
+      title: "Europe Watch",
+      region: "europe",
+      topic: null,
+      include: [
+        [
+          "Europe",
+          "European",
+          "EU",
+          "NATO",
+          "France",
+          "Germany",
+          "UK",
+          "Britain",
+          "Spain",
+          "Italy",
+          "Poland",
+          "Netherlands",
+          "Brussels",
+          "Berlin",
+          "Paris",
+          "Madrid",
+          "Rome",
+          "London",
+          "Warsaw",
+        ],
+      ],
       exclude: [],
     };
   }
-  if (kind === "news-traffic") {
+  if (kind === "news-iran") {
     return {
-      title: "NYC Traffic Watch",
-      region: "new-york-city",
-      topic: "traffic and transportation",
+      title: "Iran Watch",
+      region: "iran",
+      topic: null,
       include: [
-        ["New York", "NYC", "Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island", "MTA"],
-        ["traffic", "parking", "speed camera", "congestion pricing", "road closure", "crash", "bridge", "tunnel", "violation", "transit"],
+        [
+          "Iran",
+          "Iranian",
+          "Tehran",
+          "Khamenei",
+          "IRGC",
+          "Persian Gulf",
+          "Hormuz",
+          "Quds",
+          "Revolutionary Guard",
+        ],
       ],
       exclude: [],
     };
