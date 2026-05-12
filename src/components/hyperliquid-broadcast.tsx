@@ -86,7 +86,7 @@ export function HyperliquidBroadcast({ channel }: { channel: Channel }) {
                 Drawing the market…
               </div>
             )}
-            <CandleChart candles={candles} height={460} />
+            <CandleChart channel={channel} candles={candles} height={460} />
           </article>
         </div>
 
@@ -98,7 +98,7 @@ export function HyperliquidBroadcast({ channel }: { channel: Channel }) {
   );
 }
 
-function CandleChart({ candles, height }: { candles: Candle[]; height: number }) {
+function CandleChart({ channel, candles, height }: { channel: Channel; candles: Candle[]; height: number }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -123,10 +123,17 @@ function CandleChart({ candles, height }: { candles: Candle[]; height: number })
     });
     candleSeries.setData(candles.map((c) => ({ ...c, time: c.time as UTCTimestamp })));
 
+    const indicators = readIndicators(channel);
     const closes = candles.map((c) => c.close);
-    addLine(chart, candles, "EMA 20", ema(closes, 20), "#7ddcff");
-    addLine(chart, candles, "EMA 50", ema(closes, 50), "#ffb84d");
-    addLine(chart, candles, "VWAP", vwap(candles), "#f5d36c");
+    if (indicators.some((indicator) => indicator.type === "ema" && indicator.period === 20)) {
+      addLine(chart, candles, "EMA 20", ema(closes, 20), "#7ddcff");
+    }
+    if (indicators.some((indicator) => indicator.type === "ema" && indicator.period === 50)) {
+      addLine(chart, candles, "EMA 50", ema(closes, 50), "#ffb84d");
+    }
+    if (indicators.some((indicator) => indicator.type === "vwap")) {
+      addLine(chart, candles, "VWAP", vwap(candles), "#f5d36c");
+    }
 
     chart.timeScale().fitContent();
     const resize = () => chart.applyOptions({ width: containerRef.current?.clientWidth ?? 600 });
@@ -137,7 +144,7 @@ function CandleChart({ candles, height }: { candles: Candle[]; height: number })
       chart.remove();
       chartRef.current = null;
     };
-  }, [candles, height]);
+  }, [candles, channel, height]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }
@@ -291,6 +298,15 @@ function subscribeOrderbook(market: string, depth: number, onBook: (book: Orderb
   });
   ws.addEventListener("error", () => onError?.());
   return () => ws.close();
+}
+
+function readIndicators(channel: Channel): Array<{ type: string; period?: number }> {
+  const chart = channel.spec.ui.blocks.find((block) => block.type === "markets.chart");
+  const indicators = chart?.props.indicators;
+  if (!Array.isArray(indicators)) return [];
+  return indicators.filter((indicator): indicator is { type: string; period?: number } =>
+    !!indicator && typeof indicator === "object" && !Array.isArray(indicator) && typeof (indicator as { type?: unknown }).type === "string",
+  );
 }
 
 function readMarketConfig(channel: Channel): { market: string; timeframe: Timeframe } {

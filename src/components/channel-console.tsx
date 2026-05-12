@@ -7,8 +7,10 @@ import {
   Clock,
   Loader2,
   Radio,
+  RotateCcw,
   RefreshCw,
   Settings,
+  Share2,
   Tv,
 } from "lucide-react";
 import {
@@ -26,6 +28,7 @@ import {
 } from "@/lib/graphql";
 import { latestNarrationFor } from "@/lib/channel-data";
 import { AvatarHost } from "@/components/avatar-host";
+import { HormuzMapBackground } from "@/components/hormuz-map-background";
 import { HyperliquidBroadcast } from "@/components/hyperliquid-broadcast";
 import { SettingsDrawer } from "@/components/settings-drawer";
 import type {
@@ -71,12 +74,31 @@ type FocusOption = {
     | "news-world"
     | "news-europe"
     | "news-iran"
+    | "news-hormuz-map"
     | "market-btc"
     | "market-eth"
-    | "market-sol";
+    | "market-sol"
+    | "market-indicators";
+};
+
+type ShareSnapshot = {
+  createdAt: number;
+  channel: Channel;
 };
 
 export function ChannelConsole() {
+  const [shareSnapshot, setShareSnapshot] = useState<ShareSnapshot | null | undefined>(undefined);
+
+  useEffect(() => {
+    const encoded = new URLSearchParams(window.location.search).get("share");
+    setShareSnapshot(encoded ? decodeShareSnapshot(encoded) : null);
+  }, []);
+
+  if (shareSnapshot === undefined) {
+    return <ShellState icon={<Loader2 className="animate-spin" />} title="Starting Katechon" />;
+  }
+  if (shareSnapshot) return <SharedChannelConsole snapshot={shareSnapshot} />;
+
   const devBypass = process.env.NEXT_PUBLIC_AUTH_DEV_BYPASS === "1";
   if (devBypass) return <ChannelConsoleInner auth={devAuthSession()} />;
   return <PrivyChannelConsole />;
@@ -113,6 +135,84 @@ function devAuthSession(): AuthSession {
   };
 }
 
+function SharedChannelConsole({ snapshot }: { snapshot: ShareSnapshot }) {
+  const [expired, setExpired] = useState(false);
+  const [playIndex, setPlayIndex] = useState(0);
+  const [segmentStartedAt, setSegmentStartedAt] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
+  const channel = snapshot.channel;
+  const durationSeconds = clampNumber(channel.spec.playout?.itemDurationSeconds ?? 10, 3, 300);
+  const items = useMemo(() => extractBroadcastItems(channel), [channel]);
+  const currentItem = items.length ? items[playIndex % items.length] : null;
+  const progress = Math.min(
+    1,
+    Math.max(0, (now - segmentStartedAt) / (durationSeconds * 1000)),
+  );
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setExpired(true), 10_000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (expired || items.length === 0) return;
+    const id = window.setInterval(() => {
+      const nextNow = Date.now();
+      setNow(nextNow);
+      if (nextNow - segmentStartedAt >= durationSeconds * 1000) {
+        setPlayIndex((index) => (items.length > 1 ? (index + 1) % items.length : 0));
+        setSegmentStartedAt(nextNow);
+      }
+    }, TICK_MS);
+    return () => window.clearInterval(id);
+  }, [durationSeconds, expired, items.length, segmentStartedAt]);
+
+  function continueWatching() {
+    window.location.href = "/";
+  }
+
+  return (
+    <main className="katechon-shell min-h-screen overflow-hidden text-foreground">
+      <div className={`grid min-h-screen grid-cols-1 gap-3 p-3 transition ${expired ? "blur-sm" : ""}`}>
+        <section className="min-w-0 rounded-[28px] border border-white/10 bg-black/20 p-3 shadow-2xl shadow-black/30 sm:p-4">
+          <BroadcastStage
+            channel={channel}
+            item={currentItem}
+            progress={progress}
+            durationSeconds={durationSeconds}
+            focusOptions={[]}
+            pendingFocusLabel={null}
+            onChooseFocus={() => {}}
+            narration={null}
+            narrationHint={null}
+          />
+        </section>
+      </div>
+      <AvatarHost speechText={!expired && currentItem ? speechTextForItem(currentItem) : null} />
+      {expired ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-6 backdrop-blur-md">
+          <section className="max-w-md rounded-3xl border border-white/10 bg-surface-1 p-6 text-center shadow-2xl">
+            <div className="mx-auto mb-4 grid size-12 place-items-center rounded-full border border-accent-green/30 bg-accent-green/10 text-accent-green">
+              <Tv size={20} />
+            </div>
+            <h1 className="font-heading text-3xl font-semibold text-white">WOOPS</h1>
+            <p className="mt-2 text-sm leading-6 text-white/55">
+              That was a 10 second preview of this Katechon channel. Register to keep watching and build your own live setup.
+            </p>
+            <button
+              type="button"
+              onClick={continueWatching}
+              className="mt-5 inline-flex h-11 w-full items-center justify-center rounded-full bg-accent-green px-4 text-sm font-bold text-black hover:opacity-90"
+            >
+              Register to continue
+            </button>
+          </section>
+        </div>
+      ) : null}
+    </main>
+  );
+}
+
 function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -127,6 +227,7 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   const [apiKeyProviders, setApiKeyProviders] = useState<string[]>([]);
   const [narrationKeyHint, setNarrationKeyHint] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
   const [pendingPreview, setPendingPreview] = useState<{
     channelId: string;
     label: string;
@@ -396,11 +497,27 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
         option.prompt,
         await auth.getToken(),
       );
-      setPendingPreview({
-        channelId: active.id,
-        label: option.label,
-        preview: data.previewChannelSpecPatch,
-      });
+      if (option.kind === "news-hormuz-map" || option.kind === "market-indicators") {
+        const applied = await applyMutation(
+          data.previewChannelSpecPatch.mutation.id,
+          await auth.getToken(),
+        );
+        setChannels((current) =>
+          current.map((channel) =>
+            channel.id === applied.applyChannelMutation.channel.id
+              ? applied.applyChannelMutation.channel
+              : channel,
+          ),
+        );
+        setActiveId(applied.applyChannelMutation.channel.id);
+        await refresh({ quiet: true });
+      } else {
+        setPendingPreview({
+          channelId: active.id,
+          label: option.label,
+          preview: data.previewChannelSpecPatch,
+        });
+      }
     } catch {
       // Surface failures quietly; the focus switcher stays unchanged.
     } finally {
@@ -444,6 +561,47 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
       await rejectMutation(id, await auth.getToken());
     } catch {
       // best-effort cleanup; mutation will time out server-side anyway
+    }
+  }
+
+  async function shareActiveChannel() {
+    if (!active) return;
+    const snapshot = createShareSnapshot(active, items);
+    const url = new URL("/share", window.location.origin);
+    url.searchParams.set("share", encodeShareSnapshot(snapshot));
+    await navigator.clipboard.writeText(url.toString());
+    setShareCopied(true);
+    window.setTimeout(() => setShareCopied(false), 1800);
+  }
+
+  async function resetAllChannels() {
+    if (channels.length === 0 || pendingFocus || pendingPreview || applying) return;
+    setPendingFocus({ channelId: active?.id ?? channels[0].id, label: "Reset" });
+    try {
+      const token = await auth.getToken();
+      const updated: Channel[] = [];
+
+      for (const channel of channels) {
+        const preview = await previewChannelPatch(
+          channel.id,
+          buildResetPatch(channel),
+          "Reset all channels to their clean demo state.",
+          token,
+        );
+        const data = await applyMutation(preview.previewChannelSpecPatch.mutation.id, token);
+        updated.push(data.applyChannelMutation.channel);
+      }
+
+      setChannels((current) =>
+        current.map((channel) =>
+          updated.find((next) => next.id === channel.id) ?? channel,
+        ),
+      );
+      await refresh({ quiet: true });
+    } catch {
+      // leave channels as-is
+    } finally {
+      setPendingFocus(null);
     }
   }
 
@@ -531,6 +689,28 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
           (currentItem ? speechTextForItem(currentItem) : null)
         }
       />
+      <button
+        type="button"
+        onClick={resetAllChannels}
+        aria-label="Reset all channels"
+        className="fixed right-28 top-4 z-40 inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-white/70 shadow-lg backdrop-blur hover:bg-white/10 hover:text-white disabled:opacity-40"
+        disabled={channels.length === 0 || Boolean(pendingFocus) || Boolean(pendingPreview) || applying}
+      >
+        <RotateCcw size={15} />
+      </button>
+      <button
+        type="button"
+        onClick={shareActiveChannel}
+        aria-label="Share channel"
+        className="fixed right-16 top-4 z-40 inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-white/70 shadow-lg backdrop-blur hover:bg-white/10 hover:text-white"
+      >
+        <Share2 size={15} />
+        {shareCopied ? (
+          <span className="absolute right-0 top-11 rounded-full border border-white/10 bg-black/75 px-3 py-1 text-[11px] text-white/75 backdrop-blur">
+            Copied
+          </span>
+        ) : null}
+      </button>
       <button
         type="button"
         onClick={() => setSettingsOpen(true)}
@@ -706,6 +886,8 @@ function BroadcastStage({
   narration: ChannelNarrationMessage | null;
   narrationHint: string | null;
 }) {
+  const showHormuzMap = hasHormuzMap(channel);
+
   if (channel.spec.channelType === "hyperliquid") {
     return (
       <div className="boot-in flex min-h-[calc(100vh-32px)] flex-col gap-4">
@@ -731,6 +913,7 @@ function BroadcastStage({
       <section className="grid flex-1 gap-4">
         <div className="katechon-stage relative min-h-[calc(100vh-64px)] overflow-hidden rounded-[30px] border border-white/10 bg-black matrix-scanline">
           <div className="absolute inset-0 bg-[radial-gradient(circle_at_70%_20%,rgba(125,220,255,0.15),transparent_30%),radial-gradient(circle_at_25%_80%,rgba(255,184,77,0.10),transparent_25%)]" />
+          {showHormuzMap ? <HormuzMapBackground /> : null}
           <div className="pointer-events-none absolute inset-4 rounded-[24px] border border-white/10" />
           <div className="pointer-events-none absolute bottom-0 right-0 hidden h-[48vh] w-[min(34vw,520px)] bg-[radial-gradient(ellipse_at_bottom_right,rgba(246,240,223,0.10),rgba(40,242,143,0.06)_34%,transparent_70%)] lg:block" />
           <FocusSwitcher
@@ -1056,8 +1239,88 @@ function speechTextForItem(item: BroadcastItem): string {
   return [item.title, item.summary].filter(Boolean).join(". ");
 }
 
+function createShareSnapshot(channel: Channel, items: BroadcastItem[]): ShareSnapshot {
+  const cloned = JSON.parse(JSON.stringify(channel)) as Channel;
+  cloned.mutations = [];
+  cloned.agentJobs = [];
+  cloned.narrationMessages = [];
+
+  if (cloned.spec.channelType === "news") {
+    const snapshotItems = items.slice(0, 12).map((item) => ({
+      id: item.id,
+      title: truncateForShare(item.title, 180),
+      summary: truncateForShare(item.summary, 360),
+      source: truncateForShare(item.source, 90),
+      published: item.published,
+      link: truncateForShare(item.link, 300),
+    }));
+    cloned.dataSourcesData = [
+      {
+        sourceId: "wire",
+        sourceType: "shared-preview",
+        componentRef: null,
+        componentId: null,
+        pluginType: null,
+        data: { items: snapshotItems },
+        lastRunAt: new Date().toISOString(),
+        error: null,
+      },
+      {
+        sourceId: "filtered_wire",
+        sourceType: "shared-preview",
+        componentRef: null,
+        componentId: null,
+        pluginType: null,
+        data: { items: snapshotItems },
+        lastRunAt: new Date().toISOString(),
+        error: null,
+      },
+    ];
+  } else {
+    cloned.dataSourcesData = [];
+  }
+
+  return { createdAt: Date.now(), channel: cloned };
+}
+
+function encodeShareSnapshot(snapshot: ShareSnapshot): string {
+  const json = JSON.stringify(snapshot);
+  return btoa(unescape(encodeURIComponent(json)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function decodeShareSnapshot(encoded: string): ShareSnapshot | null {
+  try {
+    const normalized = encoded.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const json = decodeURIComponent(escape(atob(padded)));
+    const parsed = JSON.parse(json) as ShareSnapshot;
+    return parsed?.channel?.spec ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function truncateForShare(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
 function focusOptionsForChannel(channel: Channel): FocusOption[] {
   if (channel.spec.channelType === "news") {
+    if (hasHormuzMap(channel)) return [];
+    if (isIranFocus(channel)) {
+      return [
+        {
+          label: "Add a map of Strait of Hormuz",
+          hint: "Add a live map layer around the Strait of Hormuz.",
+          kind: "news-hormuz-map",
+          prompt:
+            "Add a cinematic map layer focused on the Strait of Hormuz, with key ports, islands, and shipping corridor points highlighted behind the Iran news broadcast.",
+        },
+      ];
+    }
     return [
       {
         label: "World",
@@ -1084,6 +1347,17 @@ function focusOptionsForChannel(channel: Channel): FocusOption[] {
   }
 
   if (channel.spec.channelType === "hyperliquid") {
+    if (hasMarketSelected(channel) && !hasMarketIndicators(channel)) {
+      return [
+        {
+          label: "Add indicators",
+          hint: "Add EMA overlays and VWAP to the chart.",
+          kind: "market-indicators",
+          prompt:
+            "Add chart overlays for this selected market: EMA 20, EMA 50, and VWAP. Keep the market and timeframe unchanged.",
+        },
+      ];
+    }
     return [
       {
         label: "BTC",
@@ -1112,7 +1386,100 @@ function focusOptionsForChannel(channel: Channel): FocusOption[] {
   return [];
 }
 
+function buildResetPatch(channel: Channel): Partial<Channel["spec"]> {
+  if (channel.spec.channelType === "hyperliquid") {
+    return {
+      title: "Hyperliquid Top Markets",
+      dataSources: channel.spec.dataSources.map((source) =>
+        source.id === "hyperliquid"
+          ? {
+              ...source,
+              constraints: {
+                ...source.constraints,
+                mode: "top-markets",
+                limit: 10,
+                selectedMarket: "BTC",
+                timeframe: "5m",
+              },
+            }
+          : source,
+      ),
+      ui: {
+        ...channel.spec.ui,
+        layout: "market-terminal",
+        blocks: channel.spec.ui.blocks.map((block) =>
+          block.type === "markets.chart"
+            ? {
+                ...block,
+                title: "BTC Chart",
+                props: { ...block.props, market: "BTC", timeframe: "5m", indicators: [] },
+              }
+            : block,
+        ),
+      },
+    };
+  }
+
+  return {
+    title: "International News",
+    dataSources: channel.spec.dataSources.map((source) => {
+      if (source.id === "wire") {
+        return {
+          ...source,
+          constraints: { ...source.constraints, region: "global", topic: null, event: null, limit: 100 },
+        };
+      }
+      if (source.id === "filtered_wire") {
+        return {
+          ...source,
+          constraints: { ...source.constraints, include: [], exclude: [], region: "global", topic: null, event: null },
+        };
+      }
+      return source;
+    }),
+    playout: { ...channel.spec.playout, sourceRef: "filtered_wire", itemDurationSeconds: 10, limit: 100, strategy: "latest-first", resetOnMutation: true },
+  };
+}
+
 function buildFocusPatch(channel: Channel, option: FocusOption): Partial<Channel["spec"]> {
+  if (option.kind === "market-indicators") {
+    return {
+      ui: {
+        ...channel.spec.ui,
+        blocks: channel.spec.ui.blocks.map((block) =>
+          block.type === "markets.chart"
+            ? {
+                ...block,
+                props: {
+                  ...block.props,
+                  indicators: [
+                    { type: "ema", period: 20 },
+                    { type: "ema", period: 50 },
+                    { type: "vwap" },
+                  ],
+                },
+              }
+            : block,
+        ),
+      },
+    };
+  }
+
+  if (option.kind === "news-hormuz-map") {
+    return {
+      title: "Iran Watch · Strait of Hormuz",
+      dataSources: channel.spec.dataSources.map((source) => {
+        if (source.id === "wire" || source.id === "filtered_wire") {
+          return {
+            ...source,
+            constraints: { ...source.constraints, event: "strait-of-hormuz-map" },
+          };
+        }
+        return source;
+      }),
+    };
+  }
+
   if (option.kind.startsWith("news-")) {
     const focus = newsFocusConstraints(option.kind);
     return {
@@ -1161,12 +1528,39 @@ function buildFocusPatch(channel: Channel, option: FocusOption): Partial<Channel
           ? {
               ...block,
               title: `${market} Chart`,
-              props: { ...block.props, market, timeframe },
+              props: { ...block.props, market, timeframe, indicators: [] },
             }
           : block,
       ),
     },
   };
+}
+
+function hasMarketSelected(channel: Channel): boolean {
+  if (channel.spec.channelType !== "hyperliquid") return false;
+  const source = channel.spec.dataSources.find((item) => item.id === "hyperliquid");
+  return typeof source?.constraints.selectedMarket === "string";
+}
+
+function hasMarketIndicators(channel: Channel): boolean {
+  if (channel.spec.channelType !== "hyperliquid") return false;
+  const chart = channel.spec.ui.blocks.find((block) => block.type === "markets.chart");
+  return Array.isArray(chart?.props.indicators) && chart.props.indicators.length > 0;
+}
+
+function hasHormuzMap(channel: Channel): boolean {
+  if (channel.spec.channelType !== "news") return false;
+  return channel.spec.dataSources.some((source) => source.constraints.event === "strait-of-hormuz-map");
+}
+
+function isIranFocus(channel: Channel): boolean {
+  if (channel.spec.channelType !== "news") return false;
+  if (channel.spec.title.toLowerCase().includes("iran")) return true;
+  return channel.spec.dataSources.some((source) => {
+    const region = typeof source.constraints.region === "string" ? source.constraints.region.toLowerCase() : "";
+    const includeText = JSON.stringify(source.constraints.include ?? "").toLowerCase();
+    return region.includes("iran") || includeText.includes("iran") || includeText.includes("tehran");
+  });
 }
 
 function newsFocusConstraints(kind: FocusOption["kind"]) {
