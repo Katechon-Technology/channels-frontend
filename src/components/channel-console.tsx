@@ -35,7 +35,10 @@ import type {
   ChannelNarrationMessage,
 } from "@/lib/types";
 
-const POLL_MS = 5 * 60_000; // watchdog only — live updates come via SSE subscriptions
+// SSE subscriptions only deliver mutation + narration events, not plugin
+// data-source refreshes — keep a moderate poll to stay current with rss/market
+// data on the lazy-refresh cadence.
+const POLL_MS = 30_000;
 const TICK_MS = 250;
 const NARRATION_KEEP = 16;
 
@@ -385,6 +388,10 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
       );
       setActiveId(data.applyChannelMutation.channel.id);
       setPendingPreview(null);
+      // Pull fresh data immediately — applying a focus typically swaps which
+      // upstream the filtered_wire pulls from, and the lazy-refresh delivers
+      // new items via this round-trip rather than the channelUpdated event.
+      await refresh({ quiet: true });
     } catch {
       // leave the preview open so the user can retry or cancel
     } finally {
@@ -853,12 +860,17 @@ function ShellState({ icon, title }: { icon: React.ReactNode; title: string }) {
 }
 
 function extractBroadcastItems(channel: Channel): BroadcastItem[] {
-  const dataSource = channel.spec.channelType === "news"
-    ? channel.dataSourcesData.find((source) => source.sourceId === "wire" && !source.error) ?? preferredSource(channel)
-    : preferredSource(channel);
-  const rawItems = applyNewsFocus(channel, getPayloadItems(dataSource?.data));
+  // Honor the channel's declared playout source (typically `filtered_wire`,
+  // which the keyword-filter plugin has already curated server-side). Only
+  // re-apply the client-side news focus when we're reading from the raw wire.
+  const dataSource = preferredSource(channel);
+  const rawItems = getPayloadItems(dataSource?.data);
+  const filtered =
+    channel.spec.channelType === "news" && dataSource?.sourceId === "wire"
+      ? applyNewsFocus(channel, rawItems)
+      : rawItems;
   const limit = clampNumber(channel.spec.playout?.limit ?? 100, 1, 250);
-  return rawItems
+  return filtered
     .map((item, index) => normalizeBroadcastItem(item, index, dataSource))
     .filter((item): item is BroadcastItem => Boolean(item))
     .sort((a, b) => {
