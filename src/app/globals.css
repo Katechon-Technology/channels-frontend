@@ -1,23 +1,23 @@
-@import url("https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;600;700;800&family=Spline+Sans+Mono:wght@400;500;600;700&display=swap");
 @import "tailwindcss";
 
 :root {
-  --background: #181818;
-  --foreground: #ededed;
+  --background: #07080a;
+  --foreground: #f6f0df;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --color-surface-0: #181818;
-  --color-surface-1: #222222;
-  --color-surface-2: #2a2a2a;
-  --color-surface-3: #333333;
-  --color-accent-green: #00e87b;
-  --color-accent-blue: #4d9eff;
-  --color-accent-amber: #ffb020;
-  --font-heading: "Chakra Petch", sans-serif;
-  --font-body: "IBM Plex Mono", monospace;
+  --color-surface-0: #07080a;
+  --color-surface-1: #11151a;
+  --color-surface-2: #192127;
+  --color-surface-3: #29343b;
+  --color-accent-green: #28f28f;
+  --color-accent-blue: #7ddcff;
+  --color-accent-amber: #ffb84d;
+  --font-heading: "Bricolage Grotesque", sans-serif;
+  --font-body: "Spline Sans Mono", monospace;
 }
 
 * {
@@ -33,7 +33,25 @@ body {
 
 body {
   margin: 0;
-  font-family: "IBM Plex Mono", monospace;
+  font-family: "Spline Sans Mono", monospace;
+  background:
+    radial-gradient(circle at 10% 8%, rgba(125, 220, 255, 0.16), transparent 27%),
+    radial-gradient(circle at 82% 20%, rgba(40, 242, 143, 0.13), transparent 28%),
+    linear-gradient(135deg, #07080a 0%, #111820 48%, #030404 100%);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  opacity: 0.35;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 42px 42px;
+  mask-image: radial-gradient(circle at center, black, transparent 82%);
 }
 
 button,
@@ -44,12 +62,52 @@ textarea {
 
 .matrix-scanline {
   background-image:
-    linear-gradient(to bottom, rgba(16, 185, 129, 0.06), rgba(0, 0, 0, 0)),
+    linear-gradient(to bottom, rgba(40, 242, 143, 0.06), rgba(0, 0, 0, 0)),
     repeating-linear-gradient(
       to bottom,
-      rgba(16, 185, 129, 0.06) 0px,
-      rgba(16, 185, 129, 0.06) 1px,
+      rgba(40, 242, 143, 0.065) 0px,
+      rgba(40, 242, 143, 0.065) 1px,
       transparent 1px,
       transparent 4px
     );
+}
+
+.katechon-shell {
+  background:
+    radial-gradient(circle at 15% 12%, rgba(125, 220, 255, 0.18), transparent 28%),
+    radial-gradient(circle at 76% 6%, rgba(255, 184, 77, 0.09), transparent 22%),
+    radial-gradient(circle at 58% 82%, rgba(40, 242, 143, 0.12), transparent 30%),
+    linear-gradient(135deg, #07080a 0%, #0f171d 52%, #030404 100%);
+}
+
+.glass-panel {
+  border: 1px solid rgba(246, 240, 223, 0.12);
+  background: linear-gradient(180deg, rgba(17, 21, 26, 0.84), rgba(7, 8, 10, 0.7));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.34), inset 0 1px rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(18px);
+}
+
+.katechon-stage {
+  box-shadow:
+    inset 0 0 0 1px rgba(246, 240, 223, 0.1),
+    inset 0 0 90px rgba(40, 242, 143, 0.07),
+    0 30px 90px rgba(0, 0, 0, 0.42);
+}
+
+.katechon-marquee {
+  animation: katechon-marquee 34s linear infinite;
+}
+
+@keyframes katechon-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+@keyframes soft-boot {
+  from { opacity: 0; transform: translateY(10px) scale(0.995); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.boot-in {
+  animation: soft-boot 620ms cubic-bezier(0.2, 0.85, 0.2, 1) both;
 }
