@@ -1,40 +1,43 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import {
-  Activity,
-  Bot,
-  Captions,
-  Check,
   ChevronRight,
   Clock,
   Loader2,
-  Power,
   Radio,
   RefreshCw,
-  Send,
-  Sparkles,
+  Settings,
   Tv,
-  X,
-  Zap,
 } from "lucide-react";
 import {
   applyMutation,
   createChannel,
+  fetchApiKeyProviders,
   loadChannels,
-  refreshChannelData,
+  narrateChannel,
+  previewChannelPatch,
   rejectMutation,
-  requestMutation,
+  subscribeChannelAgentJobUpdated,
+  subscribeChannelNarration,
+  subscribeChannelUpdated,
+  type ChannelMutationPreview,
 } from "@/lib/graphql";
+import { latestNarrationFor } from "@/lib/channel-data";
+import { AvatarHost } from "@/components/avatar-host";
+import { HyperliquidBroadcast } from "@/components/hyperliquid-broadcast";
+import { SettingsDrawer } from "@/components/settings-drawer";
 import type {
   Channel,
+  ChannelAgentJob,
   ChannelDataSourceData,
-  ChannelTemplate,
+  ChannelNarrationMessage,
 } from "@/lib/types";
 
-const POLL_MS = 30_000;
+const POLL_MS = 5 * 60_000; // watchdog only — live updates come via SSE subscriptions
 const TICK_MS = 250;
+const NARRATION_KEEP = 16;
 
 type AuthSession = {
   ready: boolean;
@@ -57,6 +60,19 @@ type BroadcastItem = {
   kicker: string;
 };
 
+type FocusOption = {
+  label: string;
+  hint: string;
+  prompt: string;
+  kind:
+    | "news-world"
+    | "news-new-york"
+    | "news-traffic"
+    | "market-btc"
+    | "market-eth"
+    | "market-sol";
+};
+
 export function ChannelConsole() {
   const devBypass = process.env.NEXT_PUBLIC_AUTH_DEV_BYPASS === "1";
   if (devBypass) return <ChannelConsoleInner auth={devAuthSession()} />;
@@ -73,7 +89,7 @@ function PrivyChannelConsole() {
     login,
     logout,
     getToken: async () => (authenticated ? await getAccessToken() : null),
-    loginCopy: "Privy login gates your channel mutations.",
+    loginCopy: "Sign in to continue watching.",
     modeLabel: "privy",
   };
 
@@ -89,40 +105,44 @@ function devAuthSession(): AuthSession {
     login: () => {},
     logout: () => {},
     getToken: async () => did,
-    loginCopy: "Local dev auth is active. Requests use a literal Privy DID.",
+    loginCopy: "Local preview mode is active.",
     modeLabel: "dev",
   };
 }
 
 function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   const [channels, setChannels] = useState<Channel[]>([]);
-  const [templates, setTemplates] = useState<ChannelTemplate[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [prompt, setPrompt] = useState("");
-  const [loading, setLoading] = useState(false);
   const [booting, setBooting] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [playIndex, setPlayIndex] = useState(0);
   const [segmentStartedAt, setSegmentStartedAt] = useState(() => Date.now());
   const [now, setNow] = useState(() => Date.now());
+  const [pendingFocus, setPendingFocus] = useState<{
+    channelId: string;
+    label: string;
+  } | null>(null);
+  const [apiKeyProviders, setApiKeyProviders] = useState<string[]>([]);
+  const [narrationKeyHint, setNarrationKeyHint] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pendingPreview, setPendingPreview] = useState<{
+    channelId: string;
+    label: string;
+    preview: ChannelMutationPreview;
+  } | null>(null);
+  const [applying, setApplying] = useState(false);
+  const [agentBusy, setAgentBusy] = useState(false);
+  const narrateTimerRef = useRef<number | null>(null);
+  const narratedItemsRef = useRef<Set<string>>(new Set());
 
   const active = useMemo(
     () => channels.find((channel) => channel.id === activeId) ?? channels[0] ?? null,
     [activeId, channels],
   );
-  const latestPreview =
-    active?.mutations.find((mutation) => mutation.status === "previewed") ?? null;
   const playout = active?.spec.playout;
   const durationSeconds = clampNumber(playout?.itemDurationSeconds ?? 10, 3, 300);
   const items = useMemo(() => (active ? extractBroadcastItems(active) : []), [active]);
   const itemKey = useMemo(() => itemsFingerprint(items), [items]);
   const currentItem = items.length ? items[playIndex % items.length] : null;
-  const upNext = items.length
-    ? Array.from({ length: Math.min(7, Math.max(items.length - 1, 0)) }, (_, idx) =>
-        items[(playIndex + idx + 1) % items.length],
-      )
-    : [];
   const progress = Math.min(
     1,
     Math.max(0, (now - segmentStartedAt) / (durationSeconds * 1000)),
@@ -130,18 +150,16 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
 
   const refresh = useCallback(
     async (options: { autoTune?: boolean; quiet?: boolean } = {}) => {
-      if (!options.quiet) setError(null);
       try {
         const token = await auth.getToken();
         const data = await loadChannels(token);
         let nextChannels = data.channels;
-        let nextTemplates = data.channelTemplates;
 
         if (
           options.autoTune &&
           auth.modeLabel === "dev" &&
           nextChannels.length === 0 &&
-          nextTemplates.some((template) => template.slug === "international-news")
+          data.channelTemplates.some((template) => template.slug === "international-news")
         ) {
           const created = await createChannel("international-news", token);
           const afterCreate = await loadChannels(token);
@@ -149,18 +167,16 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
             afterCreate.channels.length > 0
               ? afterCreate.channels
               : [created.createChannelFromTemplate];
-          nextTemplates = afterCreate.channelTemplates;
         }
 
-        setTemplates(nextTemplates);
         setChannels(nextChannels);
         setActiveId((current) =>
           current && nextChannels.some((channel) => channel.id === current)
             ? current
             : nextChannels[0]?.id ?? null,
         );
-      } catch (err) {
-        if (!options.quiet) setError(err instanceof Error ? err.message : String(err));
+      } catch {
+        // Keep the broadcast surface quiet; external orchestration can inspect backend errors.
       } finally {
         setBooting(false);
       }
@@ -181,11 +197,140 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     return () => window.clearInterval(id);
   }, [active, auth.authenticated, auth.ready, refresh]);
 
+  // Live updates over GraphQL SSE — replaces 30s polling for the active channel.
+  useEffect(() => {
+    if (!auth.ready || !auth.authenticated || !active) return;
+    let cancelled = false;
+    const handles: Array<{ close(): void }> = [];
+
+    const setUp = async () => {
+      const token = await auth.getToken();
+      if (cancelled) return;
+      const channelId = active.id;
+
+      handles.push(
+        subscribeChannelUpdated(channelId, token, (updated) => {
+          setChannels((current) =>
+            current.map((channel) => (channel.id === updated.id ? updated : channel)),
+          );
+        }),
+      );
+
+      handles.push(
+        subscribeChannelNarration(channelId, token, (message: ChannelNarrationMessage) => {
+          setChannels((current) =>
+            current.map((channel) =>
+              channel.id === channelId
+                ? {
+                    ...channel,
+                    narrationMessages: mergeNarration(channel.narrationMessages, message),
+                  }
+                : channel,
+            ),
+          );
+        }),
+      );
+
+      handles.push(
+        subscribeChannelAgentJobUpdated(channelId, token, (job: ChannelAgentJob) => {
+          setChannels((current) =>
+            current.map((channel) =>
+              channel.id === channelId
+                ? { ...channel, agentJobs: mergeAgentJob(channel.agentJobs, job) }
+                : channel,
+            ),
+          );
+          setAgentBusy(job.status === "queued" || job.status === "running");
+        }),
+      );
+    };
+
+    void setUp();
+
+    return () => {
+      cancelled = true;
+      for (const h of handles) h.close();
+    };
+  }, [active?.id, auth, auth.authenticated, auth.ready]);
+
   useEffect(() => {
     setPlayIndex(0);
     setSegmentStartedAt(Date.now());
     setNow(Date.now());
+    narratedItemsRef.current = new Set();
   }, [active?.id, active?.activeSpecVersion.id, itemKey]);
+
+  // Load configured api-key providers once on auth-ready; refresh after slice-D mutations.
+  useEffect(() => {
+    if (!auth.ready || !auth.authenticated) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const token = await auth.getToken();
+        const data = await fetchApiKeyProviders(token);
+        if (!cancelled) setApiKeyProviders(data.me?.apiKeyProviders ?? []);
+      } catch {
+        // Settings drawer will surface a re-fetch when opened.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [auth, auth.authenticated, auth.ready]);
+
+  // Trigger narrateChannel ~3s after the broadcast advances to a new item.
+  useEffect(() => {
+    if (!active || !currentItem) return;
+    const provider = apiKeyProviders[0];
+    if (!provider) {
+      if (apiKeyProviders.length === 0) setNarrationKeyHint("Configure an API key in Settings to enable narration.");
+      return;
+    }
+    if (narratedItemsRef.current.has(currentItem.id)) return;
+
+    if (narrateTimerRef.current !== null) {
+      window.clearTimeout(narrateTimerRef.current);
+    }
+    const targetItemId = currentItem.id;
+    const channelId = active.id;
+    const items = [
+      {
+        title: currentItem.title,
+        summary: currentItem.summary || null,
+        link: currentItem.link || null,
+        sourceLabel: currentItem.source || null,
+      },
+    ];
+    narrateTimerRef.current = window.setTimeout(async () => {
+      narrateTimerRef.current = null;
+      if (narratedItemsRef.current.has(targetItemId)) return;
+      narratedItemsRef.current.add(targetItemId);
+      try {
+        const token = await auth.getToken();
+        await narrateChannel(channelId, provider as "ANTHROPIC" | "OPENAI", items, token);
+        setNarrationKeyHint(null);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/MISSING_API_KEY/i.test(message) || /no api key/i.test(message)) {
+          setNarrationKeyHint("Configure an API key in Settings to enable narration.");
+        }
+        // Allow retry on next advance.
+        narratedItemsRef.current.delete(targetItemId);
+      }
+    }, 3_000);
+
+    return () => {
+      if (narrateTimerRef.current !== null) {
+        window.clearTimeout(narrateTimerRef.current);
+        narrateTimerRef.current = null;
+      }
+    };
+  }, [active?.id, apiKeyProviders, auth, currentItem?.id]);
+
+  const latestNarration = useMemo(
+    () => (active ? latestNarrationFor(active.narrationMessages) : null),
+    [active?.narrationMessages],
+  );
 
   useEffect(() => {
     if (items.length === 0) return;
@@ -200,40 +345,37 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     return () => window.clearInterval(id);
   }, [durationSeconds, items.length, segmentStartedAt]);
 
-  async function createFromTemplate(templateSlug: string) {
-    setLoading(true);
-    setError(null);
+  async function chooseFocus(option: FocusOption) {
+    if (!active || pendingFocus || pendingPreview) return;
+    setPendingFocus({ channelId: active.id, label: option.label });
     try {
-      const data = await createChannel(templateSlug, await auth.getToken());
-      setChannels((current) => [data.createChannelFromTemplate, ...current]);
-      setActiveId(data.createChannelFromTemplate.id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const patch = buildFocusPatch(active, option);
+      const data = await previewChannelPatch(
+        active.id,
+        patch,
+        option.prompt,
+        await auth.getToken(),
+      );
+      setPendingPreview({
+        channelId: active.id,
+        label: option.label,
+        preview: data.previewChannelSpecPatch,
+      });
+    } catch {
+      // Surface failures quietly; the focus switcher stays unchanged.
     } finally {
-      setLoading(false);
+      setPendingFocus(null);
     }
   }
 
-  async function submitTuning() {
-    if (!active || !prompt.trim()) return;
-    setLoading(true);
-    setError(null);
+  async function applyPreview() {
+    if (!pendingPreview || applying) return;
+    setApplying(true);
     try {
-      await requestMutation(active.id, prompt.trim(), await auth.getToken());
-      setPrompt("");
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function applyPreview(mutationId: string) {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await applyMutation(mutationId, await auth.getToken());
+      const data = await applyMutation(
+        pendingPreview.preview.mutation.id,
+        await auth.getToken(),
+      );
       setChannels((current) =>
         current.map((channel) =>
           channel.id === data.applyChannelMutation.channel.id
@@ -242,43 +384,55 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
         ),
       );
       setActiveId(data.applyChannelMutation.channel.id);
-      await refresh({ quiet: true });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setPendingPreview(null);
+    } catch {
+      // leave the preview open so the user can retry or cancel
     } finally {
-      setLoading(false);
+      setApplying(false);
     }
   }
 
-  async function rejectPreview(mutationId: string) {
-    setLoading(true);
-    setError(null);
+  async function cancelPreview() {
+    if (!pendingPreview) return;
+    const id = pendingPreview.preview.mutation.id;
+    setPendingPreview(null);
     try {
-      await rejectMutation(mutationId, await auth.getToken());
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
+      await rejectMutation(id, await auth.getToken());
+    } catch {
+      // best-effort cleanup; mutation will time out server-side anyway
     }
   }
 
-  async function forceRefreshActive() {
-    if (!active) return;
-    setRefreshing(true);
-    setError(null);
-    try {
-      await refreshChannelData(active.id, null, await auth.getToken());
-      await refresh({ quiet: true });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setRefreshing(false);
+  useEffect(() => {
+    if (!auth.authenticated || channels.length === 0) return;
+    function onKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || target?.isContentEditable) return;
+
+      const currentIndex = Math.max(0, channels.findIndex((channel) => channel.id === active?.id));
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        event.preventDefault();
+        setActiveId(channels[(currentIndex + 1) % channels.length]?.id ?? null);
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        event.preventDefault();
+        setActiveId(channels[(currentIndex - 1 + channels.length) % channels.length]?.id ?? null);
+      }
+      if (/^[1-9]$/.test(event.key)) {
+        const index = Number(event.key) - 1;
+        if (channels[index]) {
+          event.preventDefault();
+          setActiveId(channels[index].id);
+        }
+      }
     }
-  }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [active?.id, auth.authenticated, channels]);
 
   if (!auth.ready || booting) {
-    return <ShellState icon={<Loader2 className="animate-spin" />} title="Booting tuner" />;
+    return <ShellState icon={<Loader2 className="animate-spin" />} title="Starting Katechon" />;
   }
 
   if (!auth.authenticated) {
@@ -307,227 +461,261 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   }
 
   return (
-    <main className="min-h-screen overflow-hidden bg-[#090b0c] text-foreground">
-      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[270px_minmax(0,1fr)_350px]">
-        <ChannelRail
-          activeId={active?.id ?? null}
-          channels={channels}
-          templates={templates}
-          loading={loading}
-          auth={auth}
-          onSelect={(channelId) => setActiveId(channelId)}
-          onCreate={createFromTemplate}
-        />
-
-        <section className="min-w-0 border-x border-white/10 bg-[radial-gradient(circle_at_20%_0%,rgba(0,232,123,0.08),transparent_30%),linear-gradient(180deg,#101314,#070808)] p-3 sm:p-5">
+    <main className="katechon-shell min-h-screen overflow-hidden text-foreground">
+      <div className="grid min-h-screen grid-cols-1 gap-3 p-3">
+        <section className="min-w-0 rounded-[28px] border border-white/10 bg-black/20 p-3 shadow-2xl shadow-black/30 sm:p-4">
           {active ? (
             <BroadcastStage
               channel={active}
               item={currentItem}
-              items={items}
-              upNext={upNext}
               progress={progress}
               durationSeconds={durationSeconds}
-              refreshing={refreshing}
-              onRefresh={forceRefreshActive}
+              focusOptions={focusOptionsForChannel(active)}
+              pendingFocusLabel={pendingFocus?.channelId === active.id ? pendingFocus.label : null}
+              onChooseFocus={chooseFocus}
+              narration={latestNarration}
+              narrationHint={narrationKeyHint}
             />
           ) : (
-            <ShellState icon={<Tv />} title="No tuned channels" />
+            <ShellState icon={<Tv />} title="Nothing is on yet" />
           )}
         </section>
-
-        <aside className="bg-[#121516] p-4">
-          <TunerPanel
-            active={active}
-            prompt={prompt}
-            loading={loading}
-            error={error}
-            latestPreview={latestPreview}
-            onPrompt={setPrompt}
-            onSubmit={submitTuning}
-            onApply={applyPreview}
-            onReject={rejectPreview}
-          />
-          <NarrationPanel channel={active} />
-        </aside>
       </div>
+      <AvatarHost
+        speechText={
+          latestNarration?.text ||
+          (currentItem ? speechTextForItem(currentItem) : null)
+        }
+      />
+      <button
+        type="button"
+        onClick={() => setSettingsOpen(true)}
+        aria-label="Open settings"
+        className="fixed right-4 top-4 z-40 inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-white/70 shadow-lg backdrop-blur hover:bg-white/10 hover:text-white"
+      >
+        <Settings size={16} />
+        {apiKeyProviders.length > 0 ? (
+          <span className="absolute -bottom-1 -right-1 h-2.5 w-2.5 rounded-full border border-black bg-accent-green" />
+        ) : null}
+      </button>
+      <SettingsDrawer
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        getToken={auth.getToken}
+        onProvidersChanged={setApiKeyProviders}
+      />
+      {agentBusy ? (
+        <div className="fixed bottom-4 left-4 z-40 inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/55 px-3 py-2 text-xs text-white/70 backdrop-blur">
+          <Loader2 size={14} className="animate-spin text-accent-green" />
+          Agent working…
+        </div>
+      ) : null}
+      {pendingPreview ? (
+        <MutationPreviewModal
+          label={pendingPreview.label}
+          preview={pendingPreview.preview}
+          applying={applying}
+          onApply={applyPreview}
+          onCancel={cancelPreview}
+        />
+      ) : null}
     </main>
   );
 }
 
-function ChannelRail({
-  activeId,
-  channels,
-  templates,
-  loading,
-  auth,
-  onSelect,
-  onCreate,
+function MutationPreviewModal({
+  label,
+  preview,
+  applying,
+  onApply,
+  onCancel,
 }: {
-  activeId: string | null;
-  channels: Channel[];
-  templates: ChannelTemplate[];
-  loading: boolean;
-  auth: AuthSession;
-  onSelect: (channelId: string) => void;
-  onCreate: (templateSlug: string) => void;
+  label: string;
+  preview: ChannelMutationPreview;
+  applying: boolean;
+  onApply: () => void;
+  onCancel: () => void;
+}) {
+  const diffEntries = Object.entries(preview.diff || {});
+  const canApply = preview.canApply && preview.validationErrors.length === 0;
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center p-4" role="dialog" aria-modal="true">
+      <button
+        type="button"
+        aria-label="Cancel preview"
+        onClick={onCancel}
+        className="absolute inset-0 bg-black/65 backdrop-blur-sm"
+      />
+      <section className="relative w-full max-w-xl rounded-3xl border border-white/10 bg-surface-1 p-6 shadow-2xl">
+        <header className="mb-4">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-accent-green">Preview</div>
+          <h2 className="font-heading text-2xl font-semibold text-white">{label}</h2>
+          <p className="mt-1 text-sm text-white/55">
+            Backend validated the proposed spec. Apply to commit, or cancel to leave the channel as-is.
+          </p>
+        </header>
+        {preview.validationErrors.length > 0 ? (
+          <div className="mb-4 rounded border border-red-400/30 bg-red-500/10 p-3">
+            <div className="mb-1 text-[10px] uppercase tracking-[0.14em] text-red-300">
+              validation errors
+            </div>
+            <ul className="grid gap-1 text-sm text-red-200">
+              {preview.validationErrors.map((err) => (
+                <li key={err}>{err}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {diffEntries.length === 0 ? (
+          <p className="mb-4 text-sm text-white/55">No changes detected.</p>
+        ) : (
+          <div className="mb-4 grid max-h-72 gap-2 overflow-y-auto pr-1">
+            {diffEntries.map(([path, change]) => (
+              <div key={path} className="rounded border border-white/10 bg-black/30 p-3">
+                <div className="text-[10px] uppercase tracking-[0.14em] text-accent-blue">{path}</div>
+                <div className="mt-2 grid gap-1 text-xs">
+                  <DiffSide label="before" value={change.before} tone="muted" />
+                  <DiffSide label="after" value={change.after} tone="accent" />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-white/70 hover:text-white"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onApply}
+            disabled={!canApply || applying}
+            className="inline-flex items-center gap-2 rounded bg-accent-green px-4 py-2 text-sm font-bold text-black transition-opacity disabled:opacity-40"
+          >
+            {applying ? <Loader2 size={14} className="animate-spin" /> : null}
+            Apply
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DiffSide({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: unknown;
+  tone: "muted" | "accent";
 }) {
   return (
-    <aside className="bg-[#0d0f10] p-4">
-      <div className="mb-5 flex items-center justify-between gap-3">
-        <div>
-          <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.22em] text-accent-green">
-            <Zap size={13} />
-            on air
-          </div>
-          <h1 className="font-heading text-2xl font-semibold">Katechon TV</h1>
-        </div>
-        <button
-          onClick={auth.logout}
-          className="grid size-9 place-items-center rounded border border-white/10 bg-white/5 text-white/55 hover:text-white"
-          title="Exit"
-        >
-          <Power size={16} />
-        </button>
-      </div>
-
-      <div className="mb-5 border border-white/10 bg-black/35 p-3 text-xs text-white/45">
-        <div className="truncate">{auth.operatorLabel}</div>
-        <div className="mt-2 inline-flex items-center gap-2 border border-accent-blue/25 bg-accent-blue/10 px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-accent-blue">
-          <Radio size={12} />
-          {auth.modeLabel}
-        </div>
-      </div>
-
-      <div className="mb-6 grid gap-2">
-        {channels.map((channel, index) => (
-          <button
-            key={channel.id}
-            onClick={() => onSelect(channel.id)}
-            className={`grid grid-cols-[54px_minmax(0,1fr)_20px] items-center gap-3 border p-3 text-left transition-colors ${
-              channel.id === activeId
-                ? "border-accent-green/50 bg-accent-green/10 text-white"
-                : "border-white/10 bg-white/[0.03] text-white/65 hover:border-white/25"
-            }`}
-          >
-            <span className="font-heading text-sm text-accent-green">
-              CH {String(index + 1).padStart(2, "0")}
-            </span>
-            <span className="min-w-0">
-              <span className="block truncate font-heading text-base">{channel.name}</span>
-              <span className="mt-1 block truncate text-[10px] uppercase tracking-[0.14em] text-white/35">
-                {channel.spec.channelType} / v{channel.activeSpecVersion.versionNumber}
-              </span>
-            </span>
-            <ChevronRight size={16} className="text-white/25" />
-          </button>
-        ))}
-      </div>
-
-      <div className="border-t border-white/10 pt-4">
-        <div className="mb-2 text-[10px] uppercase tracking-[0.2em] text-white/35">
-          add channel
-        </div>
-        <div className="grid gap-2">
-          {templates.map((template) => (
-            <button
-              key={template.slug}
-              disabled={loading}
-              onClick={() => onCreate(template.slug)}
-              className="border border-white/10 bg-black/25 px-3 py-2 text-left text-xs text-white/55 hover:border-accent-blue/40 hover:text-white disabled:opacity-40"
-            >
-              {template.name}
-            </button>
-          ))}
-        </div>
-      </div>
-    </aside>
+    <div className="grid grid-cols-[64px_minmax(0,1fr)] items-start gap-2">
+      <span
+        className={
+          tone === "muted"
+            ? "text-white/35"
+            : "text-accent-green"
+        }
+      >
+        {label}
+      </span>
+      <pre className="overflow-x-auto whitespace-pre-wrap break-words text-white/75">
+        {previewValue(value)}
+      </pre>
+    </div>
   );
+}
+
+function previewValue(value: unknown): string {
+  if (value === undefined) return "—";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function BroadcastStage({
   channel,
   item,
-  items,
-  upNext,
   progress,
   durationSeconds,
-  refreshing,
-  onRefresh,
+  focusOptions,
+  pendingFocusLabel,
+  onChooseFocus,
+  narration,
+  narrationHint,
 }: {
   channel: Channel;
   item: BroadcastItem | null;
-  items: BroadcastItem[];
-  upNext: BroadcastItem[];
   progress: number;
   durationSeconds: number;
-  refreshing: boolean;
-  onRefresh: () => void;
+  focusOptions: FocusOption[];
+  pendingFocusLabel: string | null;
+  onChooseFocus: (option: FocusOption) => void;
+  narration: ChannelNarrationMessage | null;
+  narrationHint: string | null;
 }) {
-  const source = preferredSource(channel);
-  const isHyperliquidPreview =
-    channel.spec.channelType === "hyperliquid" && !source?.componentId;
+  if (channel.spec.channelType === "hyperliquid") {
+    return (
+      <div className="boot-in flex min-h-[calc(100vh-32px)] flex-col gap-4">
+        <section className="grid flex-1 gap-4">
+          <div className="katechon-stage relative min-h-[calc(100vh-64px)] overflow-hidden rounded-[30px] border border-white/10 bg-black matrix-scanline">
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_70%_20%,rgba(125,220,255,0.15),transparent_30%),radial-gradient(circle_at_25%_80%,rgba(255,184,77,0.10),transparent_25%)]" />
+            <div className="pointer-events-none absolute inset-4 rounded-[24px] border border-white/10" />
+            <div className="pointer-events-none absolute bottom-0 right-0 hidden h-[48vh] w-[min(34vw,520px)] bg-[radial-gradient(ellipse_at_bottom_right,rgba(246,240,223,0.10),rgba(40,242,143,0.06)_34%,transparent_70%)] lg:block" />
+            <HyperliquidBroadcast channel={channel} />
+            <FocusSwitcher
+              options={focusOptions}
+              pendingLabel={pendingFocusLabel}
+              onChoose={onChooseFocus}
+            />
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   return (
-    <div className="flex min-h-[calc(100vh-40px)] flex-col gap-4">
-      <header className="flex flex-wrap items-center justify-between gap-3 border border-white/10 bg-black/35 p-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="grid size-11 place-items-center border border-accent-green/30 bg-accent-green/10 text-accent-green">
-            <Tv size={20} />
-          </span>
-          <div className="min-w-0">
-            <div className="text-[10px] uppercase tracking-[0.22em] text-accent-green">
-              live channel
-            </div>
-            <h2 className="truncate font-heading text-2xl font-semibold sm:text-3xl">
-              {channel.spec.title}
-            </h2>
+    <div className="boot-in flex min-h-[calc(100vh-32px)] flex-col gap-4">
+      <section className="grid flex-1 gap-4">
+        <div className="katechon-stage relative min-h-[calc(100vh-64px)] overflow-hidden rounded-[30px] border border-white/10 bg-black matrix-scanline">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_70%_20%,rgba(125,220,255,0.15),transparent_30%),radial-gradient(circle_at_25%_80%,rgba(255,184,77,0.10),transparent_25%)]" />
+          <div className="pointer-events-none absolute inset-4 rounded-[24px] border border-white/10" />
+          <div className="pointer-events-none absolute bottom-0 right-0 hidden h-[48vh] w-[min(34vw,520px)] bg-[radial-gradient(ellipse_at_bottom_right,rgba(246,240,223,0.10),rgba(40,242,143,0.06)_34%,transparent_70%)] lg:block" />
+          <FocusSwitcher
+            options={focusOptions}
+            pendingLabel={pendingFocusLabel}
+            onChoose={onChooseFocus}
+          />
+          <div className="pointer-events-none absolute left-6 right-6 top-6 z-10 flex items-start justify-between gap-6 text-[10px] uppercase tracking-[0.2em] text-white/45 sm:left-8 sm:right-8 sm:top-8">
+            <span className="text-accent-green">Katechon</span>
+            <span className="max-w-[48vw] truncate text-right">{channel.spec.title}</span>
           </div>
-        </div>
-        <div className="flex items-center gap-2 text-xs">
-          <span className="border border-white/10 bg-white/[0.04] px-3 py-2 text-white/50">
-            {items.length} slots / {durationSeconds}s
-          </span>
-          <button
-            onClick={onRefresh}
-            disabled={refreshing}
-            className="inline-flex h-9 items-center gap-2 border border-accent-blue/35 bg-accent-blue/10 px-3 text-accent-blue hover:bg-accent-blue/15 disabled:opacity-45"
-          >
-            <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />
-            Refresh
-          </button>
-        </div>
-      </header>
-
-      <section className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_330px]">
-        <div className="relative min-h-[520px] overflow-hidden border border-white/10 bg-black matrix-scanline">
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_70%_20%,rgba(77,158,255,0.12),transparent_30%),radial-gradient(circle_at_25%_80%,rgba(255,176,32,0.08),transparent_25%)]" />
-          <div className="relative flex h-full min-h-[520px] flex-col p-5 sm:p-7">
-            <div className="mb-8 flex flex-wrap items-center justify-between gap-3 text-[10px] uppercase tracking-[0.18em]">
-              <span className="inline-flex items-center gap-2 text-accent-green">
-                <Activity size={14} />
-                transmitting
-              </span>
-              <span className="text-white/35">{sourceStatus(source)}</span>
-            </div>
-
+          <div className="relative flex h-full min-h-[520px] flex-col p-5 pt-20 sm:p-8 sm:pt-24 lg:p-10 lg:pt-28">
             {item ? (
-              <article className="flex flex-1 flex-col justify-end">
+              <article className="flex flex-1 flex-col justify-end lg:w-[calc(100%-420px)] xl:w-[calc(100%-520px)]">
                 <div className="mb-4 flex flex-wrap gap-2">
                   <span className="border border-accent-green/30 bg-accent-green/10 px-3 py-1 text-xs uppercase tracking-[0.16em] text-accent-green">
-                    {item.kicker}
+                    Now playing
                   </span>
                   <span className="border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-white/45">
                     {formatDate(item.published)}
                   </span>
                 </div>
-                <h3 className="max-w-5xl font-heading text-4xl font-semibold leading-tight text-white sm:text-6xl">
+                <h3 className="max-w-5xl font-heading text-5xl font-extrabold leading-[0.93] tracking-tight text-white sm:text-7xl">
                   {item.title}
                 </h3>
-                <p className="mt-5 max-w-4xl text-base leading-7 text-white/65 sm:text-lg">
-                  {item.summary || "No summary was provided by the source."}
+                <p className="mt-5 line-clamp-3 max-w-4xl text-base leading-7 text-white/65 sm:text-lg">
+                  {item.summary || "More details are coming in."}
                 </p>
-                <div className="mt-8 flex flex-wrap items-center justify-between gap-4">
+                <div className="mt-8 flex flex-wrap items-center gap-4">
                   <a
                     href={item.link || undefined}
                     target="_blank"
@@ -540,171 +728,76 @@ function BroadcastStage({
                   <Countdown progress={progress} seconds={durationSeconds} />
                 </div>
               </article>
-            ) : isHyperliquidPreview ? (
-              <SpecDrivenMarketPreview channel={channel} />
             ) : (
-              <OffAirState channel={channel} source={source} />
+              <OffAirState channel={channel} />
             )}
+            <CaptionStrip narration={narration} hint={narrationHint} />
           </div>
         </div>
-
-        <ProgramGuide items={upNext} current={item} channel={channel} />
       </section>
-
-      <LowerThird channel={channel} item={item} />
     </div>
   );
 }
 
-function ProgramGuide({
-  items,
-  current,
-  channel,
+function CaptionStrip({
+  narration,
+  hint,
 }: {
-  items: BroadcastItem[];
-  current: BroadcastItem | null;
-  channel: Channel;
+  narration: ChannelNarrationMessage | null;
+  hint: string | null;
 }) {
+  if (!narration && !hint) return null;
   return (
-    <aside className="border border-white/10 bg-black/35 p-3">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <div className="text-[10px] uppercase tracking-[0.2em] text-white/35">program queue</div>
-        <span className="text-[10px] uppercase tracking-[0.16em] text-accent-amber">
-          {channel.spec.playout?.strategy ?? "latest-first"}
-        </span>
-      </div>
-      {current && (
-        <div className="mb-3 border border-accent-green/30 bg-accent-green/10 p-3">
-          <div className="mb-1 text-[10px] uppercase tracking-[0.16em] text-accent-green">
-            now
-          </div>
-          <p className="text-sm font-semibold leading-5 text-white">{current.title}</p>
-        </div>
-      )}
-      <div className="grid max-h-[560px] gap-2 overflow-auto pr-1">
-        {items.map((item, index) => (
-          <article key={`${item.id}-${index}`} className="border border-white/10 bg-white/[0.03] p-3">
-            <div className="mb-1 flex items-center justify-between gap-2 text-[10px] uppercase tracking-[0.14em] text-white/35">
-              <span>next {String(index + 1).padStart(2, "0")}</span>
-              <span>{formatDate(item.published)}</span>
+    <div className="pointer-events-none absolute bottom-6 left-6 right-[min(36vw,600px)] z-20 sm:bottom-8 sm:left-8">
+      <div className="pointer-events-auto rounded-2xl border border-white/10 bg-black/55 px-5 py-3 backdrop-blur">
+        {narration ? (
+          <>
+            <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-accent-green">
+              <span>narrator</span>
+              <span className="text-white/35">{narration.source}</span>
             </div>
-            <h4 className="text-sm font-semibold leading-5 text-white/80">{item.title}</h4>
-            <p className="mt-2 text-xs leading-5 text-white/45">{item.source}</p>
-          </article>
-        ))}
-        {items.length === 0 && (
-          <div className="border border-white/10 bg-white/[0.03] p-4 text-sm leading-6 text-white/45">
-            The queue will populate once the selected data source returns broadcastable items.
-          </div>
+            <p className="text-base leading-6 text-white/90">{narration.text}</p>
+          </>
+        ) : (
+          <p className="text-xs text-white/60">{hint}</p>
         )}
       </div>
-    </aside>
+    </div>
   );
 }
 
-function TunerPanel({
-  active,
-  prompt,
-  loading,
-  error,
-  latestPreview,
-  onPrompt,
-  onSubmit,
-  onApply,
-  onReject,
+function FocusSwitcher({
+  options,
+  pendingLabel,
+  onChoose,
 }: {
-  active: Channel | null;
-  prompt: string;
-  loading: boolean;
-  error: string | null;
-  latestPreview: Channel["mutations"][number] | null;
-  onPrompt: (value: string) => void;
-  onSubmit: () => void;
-  onApply: (mutationId: string) => void;
-  onReject: (mutationId: string) => void;
+  options: FocusOption[];
+  pendingLabel: string | null;
+  onChoose: (option: FocusOption) => void;
 }) {
+  if (options.length === 0) return null;
   return (
-    <section>
-      <div className="mb-4 flex items-center gap-2">
-        <Bot size={18} className="text-accent-green" />
-        <h2 className="font-heading text-xl font-semibold">Remote Tuner</h2>
-      </div>
-      <textarea
-        value={prompt}
-        onChange={(event) => onPrompt(event.target.value)}
-        placeholder="Narrow this to European news, then Berlin tax and finance..."
-        className="h-36 w-full resize-none border border-surface-3 bg-black/35 p-3 text-sm text-white/80 outline-none focus:border-accent-green/50"
-      />
-      <button
-        disabled={!active || loading || !prompt.trim()}
-        onClick={onSubmit}
-        className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded bg-accent-green px-4 text-sm font-bold text-black disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        {loading ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-        Request retune
-      </button>
-      {error && (
-        <div className="mt-3 border border-red-500/20 bg-red-500/10 p-3 text-xs leading-5 text-red-200">
-          {error}
-        </div>
-      )}
-
-      {latestPreview && (
-        <section className="mt-5 border border-accent-amber/30 bg-accent-amber/10 p-3">
-          <div className="mb-3 flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-accent-amber">
-            <Sparkles size={14} />
-            retune proposal
-          </div>
-          <div className="max-h-64 overflow-auto border border-white/10 bg-black/35 p-3 text-xs text-white/60">
-            <pre>{JSON.stringify(latestPreview.diff, null, 2)}</pre>
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <button
-              disabled={loading}
-              onClick={() => onApply(latestPreview.id)}
-              className="inline-flex h-9 items-center justify-center gap-2 rounded bg-accent-green text-sm font-bold text-black"
-            >
-              <Check size={15} />
-              Apply
-            </button>
-            <button
-              disabled={loading}
-              onClick={() => onReject(latestPreview.id)}
-              className="inline-flex h-9 items-center justify-center gap-2 rounded border border-white/10 bg-surface-2 text-sm text-white/65"
-            >
-              <X size={15} />
-              Reject
-            </button>
-          </div>
-        </section>
-      )}
-    </section>
-  );
-}
-
-function NarrationPanel({ channel }: { channel: Channel | null }) {
-  return (
-    <section className="mt-5 border border-surface-3 bg-black/20 p-3">
-      <div className="mb-3 flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-white/35">
-        <Captions size={14} className="text-accent-blue" />
-        caption bus
-      </div>
-      <div className="grid gap-2">
-        {(channel?.narrationMessages ?? []).slice(0, 4).map((message) => (
-          <div
-            key={message.id}
-            className="border border-white/10 bg-surface-2/50 p-2 text-xs leading-5 text-white/60"
+    <div className="pointer-events-auto absolute left-1/2 top-5 z-40 flex -translate-x-1/2 rounded-full border border-white/10 bg-black/45 p-1 shadow-2xl shadow-black/30 backdrop-blur-xl sm:top-6">
+      {options.map((option) => {
+        const pending = pendingLabel === option.label;
+        return (
+          <button
+            key={option.label}
+            type="button"
+            disabled={Boolean(pendingLabel)}
+            onClick={() => onChoose(option)}
+            title={option.hint}
+            className={`min-w-24 rounded-full px-4 py-2 text-xs font-bold uppercase tracking-[0.14em] transition ${
+              pending
+                ? "bg-accent-green text-black"
+                : "text-white/62 hover:bg-white/10 hover:text-white disabled:opacity-40"
+            }`}
           >
-            {message.text}
-          </div>
-        ))}
-        {!channel?.narrationMessages.length && (
-          <p className="text-xs leading-5 text-white/40">
-            Captions arrive independently from the channel data stream.
-          </p>
-        )}
-      </div>
-    </section>
+            {pending ? "Changing…" : option.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -724,92 +817,23 @@ function Countdown({ progress, seconds }: { progress: number; seconds: number })
       </div>
       <div className="text-xs uppercase tracking-[0.16em] text-white/40">
         <Clock size={14} className="mb-1 text-accent-green" />
-        next slot
+        next story
       </div>
     </div>
   );
 }
 
-function LowerThird({ channel, item }: { channel: Channel; item: BroadcastItem | null }) {
-  const caption = channel.narrationMessages[0]?.text;
-  return (
-    <div className="border border-white/10 bg-black/45 p-3">
-      <div className="grid gap-2 sm:grid-cols-[170px_minmax(0,1fr)] sm:items-center">
-        <div className="font-heading text-sm uppercase tracking-[0.18em] text-accent-green">
-          {channel.name}
-        </div>
-        <div className="truncate text-sm text-white/65">
-          {caption || item?.title || "Awaiting next transmission"}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function OffAirState({
-  channel,
-  source,
-}: {
-  channel: Channel;
-  source: ChannelDataSourceData | null;
-}) {
+function OffAirState({ channel }: { channel: Channel }) {
   return (
     <div className="grid flex-1 place-items-center text-center">
       <div className="max-w-xl">
         <div className="mx-auto mb-4 grid size-16 place-items-center border border-accent-amber/30 bg-accent-amber/10 text-accent-amber">
           <RefreshCw size={24} />
         </div>
-        <h3 className="font-heading text-3xl font-semibold">Signal warming up</h3>
+        <h3 className="font-heading text-3xl font-semibold">Coming up shortly</h3>
         <p className="mt-3 text-sm leading-6 text-white/55">
-          {source?.error ||
-            `${channel.spec.title} is tuned, but the selected source has not returned broadcastable items yet.`}
+          {channel.spec.title} is getting the next segment ready.
         </p>
-      </div>
-    </div>
-  );
-}
-
-function SpecDrivenMarketPreview({ channel }: { channel: Channel }) {
-  const source = channel.spec.dataSources.find((item) => item.id === "hyperliquid");
-  const selected = stringify(source?.constraints.selectedMarket ?? "BTC");
-  const timeframe = stringify(source?.constraints.timeframe ?? "5m");
-  const chart = channel.spec.ui.blocks.find((block) => block.type === "markets.chart");
-  const indicators = Array.isArray(chart?.props.indicators)
-    ? chart.props.indicators.map((indicator) => stringify(indicator))
-    : [];
-
-  return (
-    <div className="flex flex-1 flex-col justify-end">
-      <div className="mb-4 inline-flex w-fit border border-accent-amber/30 bg-accent-amber/10 px-3 py-1 text-xs uppercase tracking-[0.16em] text-accent-amber">
-        spec preview / no live source
-      </div>
-      <h3 className="font-heading text-6xl font-semibold text-white">{selected}-PERP</h3>
-      <p className="mt-3 max-w-3xl text-lg leading-7 text-white/60">
-        Read-only Hyperliquid channel configured for {timeframe} analytics. Live market data will appear here once a component-backed source is wired.
-      </p>
-      <div className="mt-8 h-60 border border-white/10 bg-black/40 p-4">
-        <svg viewBox="0 0 640 220" className="h-full w-full" role="img" aria-label="Spec-driven market chart preview">
-          <polyline
-            points="0,160 70,145 130,171 200,96 270,112 340,64 410,82 485,48 550,71 640,55"
-            fill="none"
-            stroke="#00e87b"
-            strokeWidth="4"
-          />
-          <polyline
-            points="0,178 95,158 180,143 280,122 390,95 510,76 640,68"
-            fill="none"
-            stroke="#4d9eff"
-            strokeDasharray="8 8"
-            strokeWidth="2"
-          />
-        </svg>
-      </div>
-      <div className="mt-4 flex flex-wrap gap-2">
-        {indicators.map((indicator) => (
-          <span key={indicator} className="border border-accent-blue/30 bg-accent-blue/10 px-2 py-1 text-xs text-accent-blue">
-            {indicator}
-          </span>
-        ))}
       </div>
     </div>
   );
@@ -829,8 +853,10 @@ function ShellState({ icon, title }: { icon: React.ReactNode; title: string }) {
 }
 
 function extractBroadcastItems(channel: Channel): BroadcastItem[] {
-  const dataSource = preferredSource(channel);
-  const rawItems = getPayloadItems(dataSource?.data);
+  const dataSource = channel.spec.channelType === "news"
+    ? channel.dataSourcesData.find((source) => source.sourceId === "wire" && !source.error) ?? preferredSource(channel)
+    : preferredSource(channel);
+  const rawItems = applyNewsFocus(channel, getPayloadItems(dataSource?.data));
   const limit = clampNumber(channel.spec.playout?.limit ?? 100, 1, 250);
   return rawItems
     .map((item, index) => normalizeBroadcastItem(item, index, dataSource))
@@ -864,6 +890,61 @@ function getPayloadItems(payload: unknown): unknown[] {
   return Array.isArray(items) ? items : [];
 }
 
+function applyNewsFocus(channel: Channel, items: unknown[]): unknown[] {
+  if (channel.spec.channelType !== "news") return items;
+  const filterSource = channel.spec.dataSources.find((source) => source.id === "filtered_wire");
+  const wireSource = channel.spec.dataSources.find((source) => source.id === "wire");
+  const include = normalizeIncludeGroups(filterSource?.constraints.include);
+  const exclude = normalizeStringList(filterSource?.constraints.exclude);
+  const region = readConstraintString(filterSource?.constraints.region) || readConstraintString(wireSource?.constraints.region);
+  const topic = readConstraintString(filterSource?.constraints.topic) || readConstraintString(wireSource?.constraints.topic);
+  const regionTerms = region && region !== "global" ? regionTermsFor(region) : [];
+  const topicTerms = topic ? [topic] : [];
+
+  return items.filter((item) => {
+    const haystack = itemSearchText(item);
+    if (!haystack) return false;
+    if (exclude.some((term) => haystack.includes(term.toLowerCase()))) return false;
+    if (regionTerms.length > 0 && !regionTerms.some((term) => haystack.includes(term.toLowerCase()))) return false;
+    if (topicTerms.length > 0 && !topicTerms.some((term) => haystack.includes(term.toLowerCase()))) return false;
+    return include.every((group) => group.some((term) => haystack.includes(term.toLowerCase())));
+  });
+}
+
+function itemSearchText(item: unknown): string {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return "";
+  const record = item as Record<string, unknown>;
+  return [record.title, record.summary, record.description, record.text, record.feed, record.source]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+}
+
+function normalizeIncludeGroups(value: unknown): string[][] {
+  if (!Array.isArray(value)) return [];
+  if (value.every((item) => typeof item === "string")) return [value as string[]];
+  return value
+    .filter((group): group is string[] => Array.isArray(group))
+    .map((group) => group.filter((term): term is string => typeof term === "string" && term.trim().length > 0));
+}
+
+function normalizeStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((term): term is string => typeof term === "string" && term.trim().length > 0)
+    : [];
+}
+
+function readConstraintString(value: unknown): string {
+  return typeof value === "string" ? value.toLowerCase().trim() : "";
+}
+
+function regionTermsFor(region: string): string[] {
+  if (["new-york-city", "nyc", "new york"].includes(region)) {
+    return ["new york", "nyc", "manhattan", "brooklyn", "queens", "bronx", "staten island"];
+  }
+  return [region.replace(/-/g, " ")];
+}
+
 function normalizeBroadcastItem(
   value: unknown,
   index: number,
@@ -892,17 +973,152 @@ function readString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function stringify(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  return JSON.stringify(value) ?? "";
+function speechTextForItem(item: BroadcastItem): string {
+  return [item.title, item.summary].filter(Boolean).join(". ");
 }
 
-function sourceStatus(source: ChannelDataSourceData | null): string {
-  if (!source) return "no source selected";
-  if (source.error) return source.error;
-  if (source.lastRunAt) return `updated ${formatDate(source.lastRunAt)}`;
-  return source.componentId ? "component connected" : "spec-only source";
+function focusOptionsForChannel(channel: Channel): FocusOption[] {
+  if (channel.spec.channelType === "news") {
+    return [
+      {
+        label: "World",
+        hint: "Return to a broad international briefing.",
+        kind: "news-world",
+        prompt:
+          "Make this a broad world news channel again. Set the news region to global, clear keyword include and exclude filters, keep the simple broadcast presentation, and keep story rotation readable for a general viewer.",
+      },
+      {
+        label: "New York",
+        hint: "Focus the channel on New York City.",
+        kind: "news-new-york",
+        prompt:
+          "Focus this news channel on New York City. Update the news source and keyword filter toward NYC, New York, Manhattan, Brooklyn, Queens, city agencies, transit, weather, public safety, and local policy. Keep the UI as a simple viewer-facing broadcast.",
+      },
+      {
+        label: "Traffic",
+        hint: "Follow traffic, roads, and violations.",
+        kind: "news-traffic",
+        prompt:
+          "Focus this news channel on NYC traffic and enforcement. Prioritize stories about traffic violations, parking, speed cameras, congestion pricing, MTA delays, road closures, crashes, bridges, tunnels, and city transportation enforcement. Keep the UI as a simple viewer-facing broadcast.",
+      },
+    ];
+  }
+
+  if (channel.spec.channelType === "hyperliquid") {
+    return [
+      {
+        label: "BTC",
+        hint: "Watch Bitcoin on a five-minute chart.",
+        kind: "market-btc",
+        prompt:
+          "Switch the market channel to BTC with a 5m timeframe. Update selectedMarket, the chart props, and the title so the viewer sees a BTC market watch.",
+      },
+      {
+        label: "ETH",
+        hint: "Watch Ethereum on a fifteen-minute chart.",
+        kind: "market-eth",
+        prompt:
+          "Switch the market channel to ETH with a 15m timeframe. Update selectedMarket, the chart props, and the title so the viewer sees an ETH market watch.",
+      },
+      {
+        label: "SOL",
+        hint: "Watch Solana on a one-minute chart.",
+        kind: "market-sol",
+        prompt:
+          "Switch the market channel to SOL with a 1m timeframe. Update selectedMarket, the chart props, and the title so the viewer sees a SOL market watch.",
+      },
+    ];
+  }
+
+  return [];
+}
+
+function buildFocusPatch(channel: Channel, option: FocusOption): Partial<Channel["spec"]> {
+  if (option.kind.startsWith("news-")) {
+    const focus = newsFocusConstraints(option.kind);
+    return {
+      title: focus.title,
+      dataSources: channel.spec.dataSources.map((source) => {
+        if (source.id === "wire") {
+          return {
+            ...source,
+            constraints: { ...source.constraints, region: focus.region, topic: focus.topic, limit: 100 },
+          };
+        }
+        if (source.id === "filtered_wire") {
+          return {
+            ...source,
+            constraints: {
+              ...source.constraints,
+              include: focus.include,
+              exclude: focus.exclude,
+              region: focus.region,
+              topic: focus.topic,
+            },
+          };
+        }
+        return source;
+      }),
+      playout: { ...channel.spec.playout, sourceRef: "filtered_wire", itemDurationSeconds: 10, limit: 100, strategy: "latest-first", resetOnMutation: true },
+    };
+  }
+
+  const market = option.kind === "market-eth" ? "ETH" : option.kind === "market-sol" ? "SOL" : "BTC";
+  const timeframe = option.kind === "market-eth" ? "15m" : option.kind === "market-sol" ? "1m" : "5m";
+  return {
+    title: `${market} Market Watch`,
+    dataSources: channel.spec.dataSources.map((source) =>
+      source.id === "hyperliquid"
+        ? {
+            ...source,
+            constraints: { ...source.constraints, selectedMarket: market, timeframe },
+          }
+        : source,
+    ),
+    ui: {
+      ...channel.spec.ui,
+      blocks: channel.spec.ui.blocks.map((block) =>
+        block.type === "markets.chart"
+          ? {
+              ...block,
+              title: `${market} Chart`,
+              props: { ...block.props, market, timeframe },
+            }
+          : block,
+      ),
+    },
+  };
+}
+
+function newsFocusConstraints(kind: FocusOption["kind"]) {
+  if (kind === "news-new-york") {
+    return {
+      title: "New York Watch",
+      region: "new-york-city",
+      topic: "local news",
+      include: [["New York", "NYC", "Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island", "MTA", "City Hall"]],
+      exclude: [],
+    };
+  }
+  if (kind === "news-traffic") {
+    return {
+      title: "NYC Traffic Watch",
+      region: "new-york-city",
+      topic: "traffic and transportation",
+      include: [
+        ["New York", "NYC", "Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island", "MTA"],
+        ["traffic", "parking", "speed camera", "congestion pricing", "road closure", "crash", "bridge", "tunnel", "violation", "transit"],
+      ],
+      exclude: [],
+    };
+  }
+  return {
+    title: "International News",
+    region: "global",
+    topic: null,
+    include: [],
+    exclude: [],
+  };
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -926,4 +1142,20 @@ function itemsFingerprint(items: BroadcastItem[]): string {
     .slice(0, 8)
     .map((item) => item.id)
     .join("|");
+}
+
+function mergeNarration(
+  existing: ChannelNarrationMessage[],
+  incoming: ChannelNarrationMessage,
+): ChannelNarrationMessage[] {
+  if (existing.some((m) => m.id === incoming.id)) return existing;
+  return [incoming, ...existing].slice(0, NARRATION_KEEP);
+}
+
+function mergeAgentJob(
+  existing: ChannelAgentJob[],
+  incoming: ChannelAgentJob,
+): ChannelAgentJob[] {
+  const filtered = existing.filter((j) => j.id !== incoming.id);
+  return [incoming, ...filtered].slice(0, 16);
 }
