@@ -12,6 +12,13 @@ export type ChannelSpec = {
     layout: "channel-stack" | "split-dashboard" | "market-terminal";
     blocks: ChannelBlock[];
   };
+  playout?: {
+    sourceRef: string;
+    itemDurationSeconds: number;
+    limit: number;
+    strategy: "latest-first";
+    resetOnMutation: boolean;
+  };
   capabilities: {
     allowedDataSourceTypes: string[];
     allowedBlocks: string[];
@@ -56,6 +63,7 @@ export type Channel = {
   mutations: ChannelMutation[];
   agentJobs: ChannelAgentJob[];
   narrationMessages: ChannelNarrationMessage[];
+  dataSourcesData: ChannelDataSourceData[];
 };
 
 export type ChannelTemplate = {
@@ -93,4 +101,15 @@ export type ChannelNarrationMessage = {
   text: string;
   source: string;
   createdAt: string;
+};
+
+export type ChannelDataSourceData = {
+  sourceId: string;
+  sourceType: string;
+  componentRef?: string | null;
+  componentId?: string | null;
+  pluginType?: string | null;
+  data?: unknown | null;
+  lastRunAt?: string | null;
+  error?: string | null;
 };

@@ -47,6 +47,16 @@ export const CHANNEL_FIELDS = `
   }
   agentJobs { id status prompt error mutationId createdAt updatedAt }
   narrationMessages(limit: 8) { id text source createdAt }
+  dataSourcesData {
+    sourceId
+    sourceType
+    componentRef
+    componentId
+    pluginType
+    data
+    lastRunAt
+    error
+  }
 `;
 
 export async function loadChannels(token?: string | null) {
@@ -123,6 +133,33 @@ export async function rejectMutation(mutationId: string, token?: string | null) 
       }
     `,
     { mutationId },
+    token,
+  );
+}
+
+export async function refreshChannelData(
+  channelId: string,
+  sourceId?: string | null,
+  token?: string | null,
+) {
+  return graphql<{
+    refreshChannelData: Channel["dataSourcesData"];
+  }>(
+    `
+      mutation RefreshChannelData($channelId: ID!, $sourceId: String) {
+        refreshChannelData(channelId: $channelId, sourceId: $sourceId) {
+          sourceId
+          sourceType
+          componentRef
+          componentId
+          pluginType
+          data
+          lastRunAt
+          error
+        }
+      }
+    `,
+    { channelId, sourceId },
     token,
   );
 }
