@@ -5,15 +5,21 @@ import type {
   ChannelTemplate,
 } from "./types";
 
-const GRAPHQL_URL =
-  process.env.NEXT_PUBLIC_KATECHON_BACKEND_URL || "http://localhost:8080/graphql";
+const GRAPHQL_URL = process.env.NEXT_PUBLIC_KATECHON_BACKEND_URL;
+
+function graphqlUrl(): string {
+  if (!GRAPHQL_URL) {
+    throw new Error("NEXT_PUBLIC_KATECHON_BACKEND_URL is required");
+  }
+  return GRAPHQL_URL;
+}
 
 export async function graphql<T>(
   query: string,
   variables: Record<string, unknown> = {},
   token?: string | null,
 ): Promise<T> {
-  const resp = await fetch(GRAPHQL_URL, {
+  const resp = await fetch(graphqlUrl(), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -197,7 +203,7 @@ export function subscribe<T>(
 
   void (async () => {
     try {
-      const resp = await fetch(GRAPHQL_URL, {
+      const resp = await fetch(graphqlUrl(), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
