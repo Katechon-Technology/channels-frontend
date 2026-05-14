@@ -633,7 +633,7 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [active?.id, auth.authenticated, channels]);
 
-  if (!auth.ready || booting) {
+  if (!auth.ready) {
     return <ShellState icon={<Loader2 className="animate-spin" />} title="Starting Katechon" />;
   }
 
@@ -660,6 +660,10 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
         </section>
       </main>
     );
+  }
+
+  if (booting) {
+    return <ShellState icon={<Loader2 className="animate-spin" />} title="Starting Katechon" />;
   }
 
   return (
