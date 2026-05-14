@@ -44,6 +44,7 @@ import type {
 const POLL_MS = 30_000;
 const TICK_MS = 250;
 const NARRATION_KEEP = 16;
+const BOOTSTRAP_CHANNEL_TEMPLATES = ["international-news", "hyperliquid-readonly"] as const;
 
 type AuthSession = {
   ready: boolean;
@@ -258,18 +259,36 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
         const data = await loadChannels(token);
         let nextChannels = data.channels;
 
-        if (
-          options.autoTune &&
-          auth.modeLabel === "dev" &&
-          nextChannels.length === 0 &&
-          data.channelTemplates.some((template) => template.slug === "international-news")
-        ) {
-          const created = await createChannel("international-news", token);
-          const afterCreate = await loadChannels(token);
-          nextChannels =
-            afterCreate.channels.length > 0
-              ? afterCreate.channels
-              : [created.createChannelFromTemplate];
+        if (options.autoTune) {
+          const availableTemplates = new Set(data.channelTemplates.map((template) => template.slug));
+          const existingTemplates = new Set(
+            nextChannels
+              .map((channel) => channel.templateSlug)
+              .filter((slug): slug is string => Boolean(slug)),
+          );
+          const hasOnlyBootstrapChannels =
+            nextChannels.length === 0 ||
+            nextChannels.every(
+              (channel) =>
+                channel.templateSlug &&
+                BOOTSTRAP_CHANNEL_TEMPLATES.includes(
+                  channel.templateSlug as (typeof BOOTSTRAP_CHANNEL_TEMPLATES)[number],
+                ),
+            );
+          const missingBootstrapTemplates = BOOTSTRAP_CHANNEL_TEMPLATES.filter(
+            (slug) => availableTemplates.has(slug) && !existingTemplates.has(slug),
+          );
+
+          if (hasOnlyBootstrapChannels && missingBootstrapTemplates.length > 0) {
+            const created = await Promise.all(
+              missingBootstrapTemplates.map((slug) => createChannel(slug, token)),
+            );
+            const afterCreate = await loadChannels(token);
+            nextChannels =
+              afterCreate.channels.length > 0
+                ? afterCreate.channels
+                : [...nextChannels, ...created.map((result) => result.createChannelFromTemplate)];
+          }
         }
 
         setChannels(nextChannels);
