@@ -1161,10 +1161,14 @@ function itemSearchText(item: unknown): string {
 
 function normalizeIncludeGroups(value: unknown): string[][] {
   if (!Array.isArray(value)) return [];
-  if (value.every((item) => typeof item === "string")) return [value as string[]];
+  if (value.every((item) => typeof item === "string")) {
+    const terms = (value as string[]).filter((term) => term.trim().length > 0);
+    return terms.length > 0 ? [terms] : [];
+  }
   return value
     .filter((group): group is string[] => Array.isArray(group))
-    .map((group) => group.filter((term): term is string => typeof term === "string" && term.trim().length > 0));
+    .map((group) => group.filter((term): term is string => typeof term === "string" && term.trim().length > 0))
+    .filter((group) => group.length > 0);
 }
 
 function normalizeStringList(value: unknown): string[] {
