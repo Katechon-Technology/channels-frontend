@@ -9,8 +9,9 @@ export default function MarketsFunding({ region, channel }: RegionComponentProps
   const source = getDataSource(channel, region.sourceRef);
   const showPredicted = readBoolean(region.props.showPredicted, true);
   const stats = readFundingFromSource(source);
+  const title = typeof region.props.title === "string" ? region.props.title : undefined;
   return (
-    <Panel title="Funding" icon={<CircleDollarSign size={15} />} sourceRef={region.sourceRef}>
+    <Panel title={title} icon={title ? <CircleDollarSign size={15} /> : undefined}>
       <div className={`grid gap-3 text-center ${showPredicted ? "grid-cols-3" : "grid-cols-2"}`}>
         <Stat
           label="Funding"

@@ -20,6 +20,7 @@ const MarketsFunding = lazy(() => import("./regions/markets-funding"));
 const NarrationCaptions = lazy(() => import("./regions/narration-captions"));
 const BroadcastHyperliquid = lazy(() => import("./regions/broadcast-hyperliquid"));
 const BroadcastPolymarket = lazy(() => import("./regions/broadcast-polymarket"));
+const BroadcastNews = lazy(() => import("./regions/broadcast-news"));
 const MapLeaflet = lazy(() => import("./regions/map-leaflet"));
 const HeaderStation = lazy(() => import("./regions/header-station"));
 const TickerHeadlines = lazy(() => import("./regions/ticker-headlines"));
@@ -42,6 +43,7 @@ const COMPONENT_REGISTRY: Record<
   "narration.captions": NarrationCaptions,
   "broadcast.hyperliquid": BroadcastHyperliquid,
   "broadcast.polymarket": BroadcastPolymarket,
+  "broadcast.news": BroadcastNews,
   "map.leaflet": MapLeaflet,
   "header.station": HeaderStation,
   "ticker.headlines": TickerHeadlines,

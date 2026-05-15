@@ -11,8 +11,9 @@ export default function MarketsOrderbook({ region, channel }: RegionComponentPro
     channel.spec.dataSources.find((s) => s.id === region.sourceRef)?.constraints.selectedMarket ?? "",
   ).toUpperCase();
   const book = readBookFromSource(source, symbol);
+  const title = typeof region.props.title === "string" ? region.props.title : undefined;
   return (
-    <Panel title="Order Book" icon={<Activity size={15} />} sourceRef={region.sourceRef}>
+    <Panel title={title} icon={title ? <Activity size={15} /> : undefined}>
       {book ? (
         <>
           <DepthRows side="ask" levels={book.asks.slice(0, 3).reverse()} />

@@ -8,8 +8,9 @@ import { EmptyState, Panel, formatPrice } from "./_panel";
 export default function MarketsTicker({ region, channel }: RegionComponentProps) {
   const declaredMarkets = readBlockMarkets({ props: region.props });
   const rows = extractMarketRows(channel, declaredMarkets);
+  const title = typeof region.props.title === "string" ? region.props.title : undefined;
   return (
-    <Panel title="Top Markets" icon={<Radio size={15} />} sourceRef={region.sourceRef}>
+    <Panel title={title} icon={title ? <Radio size={15} /> : undefined}>
       {rows.length === 0 ? (
         <EmptyState message="no markets curated" />
       ) : (

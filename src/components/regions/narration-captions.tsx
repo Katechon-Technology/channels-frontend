@@ -8,8 +8,9 @@ import { Panel, formatTimeAgo, readNumber } from "./_panel";
 export default function NarrationCaptions({ region, channel }: RegionComponentProps) {
   const maxLines = Math.max(1, Math.min(20, Math.round(readNumber(region.props.maxLines, 4))));
   const latest = latestNarrationFor(channel.narrationMessages);
+  const title = typeof region.props.title === "string" ? region.props.title : undefined;
   return (
-    <Panel title="Narration" icon={<Captions size={15} />}>
+    <Panel title={title} icon={title ? <Captions size={15} /> : undefined}>
       {latest ? (
         <div className="grid gap-2">
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-accent-blue">

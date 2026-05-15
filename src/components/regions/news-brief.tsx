@@ -10,8 +10,10 @@ export default function NewsBrief({ region, channel }: RegionComponentProps) {
   const focus = spec.dataSources.flatMap((source) =>
     Object.entries(source.constraints).map(([key, value]) => `${key}: ${stringify(value)}`),
   );
+  const explicitTitle = typeof region.props.title === "string" ? region.props.title : undefined;
+  const title = explicitTitle ?? (focusLabel || undefined);
   return (
-    <Panel title={focusLabel || "Brief"} icon={<BookOpen size={15} />} sourceRef={region.sourceRef}>
+    <Panel title={title} icon={title ? <BookOpen size={15} /> : undefined}>
       <div className="grid gap-3 text-sm text-white/70">
         <p className="font-heading text-2xl font-semibold text-white">{spec.title}</p>
         <p>

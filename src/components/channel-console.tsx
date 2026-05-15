@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import {
+  Bot,
   Loader2,
   Radio,
   RotateCcw,
@@ -16,6 +17,7 @@ import {
   fetchApiKeyProviders,
   loadChannels,
   narrateChannel,
+  previewChannelPatch,
   rejectMutation,
   requestMutation,
   subscribeChannelAgentJobUpdated,
@@ -24,6 +26,13 @@ import {
   type ChannelMutationPreview,
 } from "@/lib/graphql";
 import { latestNarrationFor } from "@/lib/channel-data";
+import {
+  buildFocusPatch,
+  buildResetPatch,
+  focusOptionsForChannel,
+  isAutoApplyOption,
+  type FocusOption,
+} from "@/lib/focus-presets";
 import { AvatarHost } from "@/components/avatar-host";
 import { ChannelGrid } from "@/components/channel-grid";
 import { SettingsDrawer } from "@/components/settings-drawer";
@@ -158,10 +167,11 @@ function SharedChannelConsole({ snapshot }: { snapshot: ShareSnapshot }) {
         <section className="min-w-0 rounded-[28px] border border-white/10 bg-black/20 p-3 shadow-2xl shadow-black/30 sm:p-4">
           <BroadcastStage
             channel={channel}
-            focusOptions={[]}
+            presetOptions={[]}
+            suggestedActions={[]}
             pendingFocusLabel={null}
-            onChooseFocus={() => {}}
-            onSubmitPrompt={() => {}}
+            onChoosePreset={() => {}}
+            onChooseSuggested={() => {}}
           />
         </section>
       </div>
@@ -202,6 +212,8 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   } | null>(null);
   const [apiKeyProviders, setApiKeyProviders] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [agentPromptOpen, setAgentPromptOpen] = useState(false);
+  const [agentPromptError, setAgentPromptError] = useState<string | null>(null);
   const [shareCopied, setShareCopied] = useState(false);
   const [pendingPreview, setPendingPreview] = useState<{
     channelId: string;
@@ -461,15 +473,34 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     return () => window.clearInterval(id);
   }, [agentDriven, durationSeconds, items.length, segmentStartedAt]);
 
-  async function chooseFocus(option: ChannelSuggestedAction) {
+  async function choosePreset(option: FocusOption) {
     if (!active || pendingFocus || pendingPreview) return;
     setPendingFocus({ channelId: active.id, label: option.label });
     try {
-      await requestMutation(active.id, option.prompt, await auth.getToken());
-      // The agent runs asynchronously. Status flows in through
-      // subscribeChannelAgentJobUpdated, the preview modal opens when the
-      // backend reports `previewed`, and the FocusSwitcher's pending state
-      // clears as soon as we hand the prompt off.
+      const patch = buildFocusPatch(active, option);
+      const token = await auth.getToken();
+      const data = await previewChannelPatch(active.id, patch, option.prompt, token);
+      if (isAutoApplyOption(option.kind)) {
+        const applied = await applyMutation(
+          data.previewChannelSpecPatch.mutation.id,
+          await auth.getToken(),
+        );
+        setChannels((current) =>
+          current.map((channel) =>
+            channel.id === applied.applyChannelMutation.channel.id
+              ? applied.applyChannelMutation.channel
+              : channel,
+          ),
+        );
+        setActiveId(applied.applyChannelMutation.channel.id);
+        await refresh({ quiet: true });
+      } else {
+        setPendingPreview({
+          channelId: active.id,
+          label: option.label,
+          preview: data.previewChannelSpecPatch,
+        });
+      }
     } catch {
       // Surface failures quietly; the focus switcher stays unchanged.
     } finally {
@@ -477,14 +508,35 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     }
   }
 
-  async function submitAgentPrompt(prompt: string) {
+  async function chooseSuggestedAction(option: ChannelSuggestedAction) {
+    if (!active || pendingFocus || pendingPreview) return;
+    setPendingFocus({ channelId: active.id, label: option.label });
+    try {
+      await requestMutation(active.id, option.prompt, await auth.getToken());
+      // The agent runs async; the preview modal opens via subscribeChannelAgentJobUpdated.
+    } catch {
+      // ignore
+    } finally {
+      setPendingFocus(null);
+    }
+  }
+
+  async function submitAgentPrompt(prompt: string): Promise<boolean> {
     const trimmed = prompt.trim();
-    if (!active || !trimmed || pendingFocus || pendingPreview) return;
+    if (!active || !trimmed || pendingFocus || pendingPreview) return false;
+    setAgentPromptError(null);
     setPendingFocus({ channelId: active.id, label: "Sending…" });
     try {
       await requestMutation(active.id, trimmed, await auth.getToken());
-    } catch {
-      // ignore
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setAgentPromptError(
+        /AGENT_SERVICE_URL|not configured/i.test(message)
+          ? "Agent service isn't configured on the backend. Set AGENT_SERVICE_URL and retry."
+          : `Agent dispatch failed: ${message}`,
+      );
+      return false;
     } finally {
       setPendingFocus(null);
     }
@@ -544,13 +596,23 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     setPendingFocus({ channelId: active?.id ?? channels[0].id, label: "Reset" });
     try {
       const token = await auth.getToken();
+      const updated: Channel[] = [];
       for (const channel of channels) {
-        await requestMutation(
+        const preview = await previewChannelPatch(
           channel.id,
-          "Reset this channel back to its clean default broadcast state.",
+          buildResetPatch(channel),
+          "Reset all channels to their clean demo state.",
           token,
         );
+        const data = await applyMutation(preview.previewChannelSpecPatch.mutation.id, token);
+        updated.push(data.applyChannelMutation.channel);
       }
+      setChannels((current) =>
+        current.map((channel) =>
+          updated.find((next) => next.id === channel.id) ?? channel,
+        ),
+      );
+      await refresh({ quiet: true });
     } catch {
       // leave channels as-is
     } finally {
@@ -626,10 +688,11 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
           {active ? (
             <BroadcastStage
               channel={active}
-              focusOptions={active.suggestedActions ?? []}
+              presetOptions={focusOptionsForChannel(active)}
+              suggestedActions={active.suggestedActions ?? []}
               pendingFocusLabel={pendingFocus?.channelId === active.id ? pendingFocus.label : null}
-              onChooseFocus={chooseFocus}
-              onSubmitPrompt={submitAgentPrompt}
+              onChoosePreset={choosePreset}
+              onChooseSuggested={chooseSuggestedAction}
             />
           ) : (
             <ShellState icon={<Tv />} title="Nothing is on yet" />
@@ -646,10 +709,25 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
         type="button"
         onClick={resetAllChannels}
         aria-label="Reset all channels"
-        className="fixed right-28 top-4 z-40 inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-white/70 shadow-lg backdrop-blur hover:bg-white/10 hover:text-white disabled:opacity-40"
+        className="fixed right-40 top-4 z-40 inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-white/70 shadow-lg backdrop-blur hover:bg-white/10 hover:text-white disabled:opacity-40"
         disabled={channels.length === 0 || Boolean(pendingFocus) || Boolean(pendingPreview) || applying}
       >
         <RotateCcw size={15} />
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          setAgentPromptError(null);
+          setAgentPromptOpen(true);
+        }}
+        aria-label="Run agent"
+        disabled={!active || Boolean(pendingFocus) || Boolean(pendingPreview)}
+        className="fixed right-28 top-4 z-40 inline-flex h-9 w-9 items-center justify-center rounded-full border border-accent-green/40 bg-accent-green/15 text-accent-green shadow-lg backdrop-blur hover:bg-accent-green/25 disabled:opacity-40"
+      >
+        <Bot size={16} />
+        {agentBusy ? (
+          <span className="absolute -bottom-1 -right-1 h-2.5 w-2.5 animate-pulse rounded-full border border-black bg-accent-green" />
+        ) : null}
       </button>
       <button
         type="button"
@@ -696,7 +774,87 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
           onCancel={cancelPreview}
         />
       ) : null}
+      {agentPromptOpen && active ? (
+        <RunAgentModal
+          channelTitle={active.spec.title}
+          pending={pendingFocus?.label === "Sending…"}
+          error={agentPromptError}
+          onCancel={() => setAgentPromptOpen(false)}
+          onSubmit={async (prompt) => {
+            const ok = await submitAgentPrompt(prompt);
+            if (ok) setAgentPromptOpen(false);
+          }}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function RunAgentModal({
+  channelTitle,
+  pending,
+  error,
+  onCancel,
+  onSubmit,
+}: {
+  channelTitle: string;
+  pending: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onSubmit: (prompt: string) => void;
+}) {
+  const [prompt, setPrompt] = useState("");
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-6 backdrop-blur-md">
+      <section className="w-full max-w-lg rounded-3xl border border-white/10 bg-surface-1 p-6 shadow-2xl">
+        <header className="mb-4 flex items-start gap-3">
+          <span className="grid size-10 place-items-center rounded-full border border-accent-green/30 bg-accent-green/10 text-accent-green">
+            <Bot size={18} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="font-heading text-2xl font-semibold text-white">Run channel agent</h2>
+            <p className="mt-1 text-xs text-white/55 truncate">Channel: {channelTitle}</p>
+          </div>
+        </header>
+        <p className="mb-3 text-sm text-white/65">
+          Describe what the agent should change. It can add a map, a ticker, popups,
+          switch focus, or anything within this channel&apos;s capabilities.
+        </p>
+        <textarea
+          value={prompt}
+          onChange={(event) => setPrompt(event.target.value)}
+          autoFocus
+          disabled={pending}
+          placeholder="e.g. Add a live map of the Strait of Hormuz behind the broadcast."
+          rows={5}
+          className="w-full rounded-2xl border border-white/10 bg-black/35 p-3 text-sm text-white/85 placeholder:text-white/35 focus:border-accent-green/40 focus:outline-none disabled:opacity-50"
+        />
+        {error ? (
+          <p className="mt-3 rounded-2xl border border-red-400/40 bg-red-500/10 p-3 text-xs leading-5 text-red-200">
+            {error}
+          </p>
+        ) : null}
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-full border border-white/10 px-4 py-2 text-xs font-bold uppercase tracking-[0.14em] text-white/65 hover:bg-white/10 disabled:opacity-40"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onSubmit(prompt)}
+            disabled={!prompt.trim() || pending}
+            className="inline-flex items-center gap-2 rounded-full bg-accent-green px-4 py-2 text-xs font-bold uppercase tracking-[0.14em] text-black transition hover:opacity-90 disabled:opacity-40"
+          >
+            {pending ? <Loader2 size={14} className="animate-spin" /> : <Bot size={14} />}
+            {pending ? "Sending…" : "Run agent"}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -820,16 +978,18 @@ function previewValue(value: unknown): string {
 
 function BroadcastStage({
   channel,
-  focusOptions,
+  presetOptions,
+  suggestedActions,
   pendingFocusLabel,
-  onChooseFocus,
-  onSubmitPrompt,
+  onChoosePreset,
+  onChooseSuggested,
 }: {
   channel: Channel;
-  focusOptions: ChannelSuggestedAction[];
+  presetOptions: FocusOption[];
+  suggestedActions: ChannelSuggestedAction[];
   pendingFocusLabel: string | null;
-  onChooseFocus: (option: ChannelSuggestedAction) => void;
-  onSubmitPrompt: (prompt: string) => void;
+  onChoosePreset: (option: FocusOption) => void;
+  onChooseSuggested: (option: ChannelSuggestedAction) => void;
 }) {
   return (
     <div className="boot-in flex min-h-[calc(100vh-32px)] flex-col gap-4">
@@ -837,10 +997,11 @@ function BroadcastStage({
         <div className="katechon-stage relative min-h-[calc(100vh-64px)] overflow-hidden rounded-[30px] border border-white/10 bg-black matrix-scanline">
           <ChannelGrid channel={channel} />
           <FocusSwitcher
-            options={focusOptions}
+            presets={presetOptions}
+            suggested={suggestedActions}
             pendingLabel={pendingFocusLabel}
-            onChoose={onChooseFocus}
-            onSubmitPrompt={onSubmitPrompt}
+            onChoosePreset={onChoosePreset}
+            onChooseSuggested={onChooseSuggested}
           />
         </div>
       </section>
@@ -849,63 +1010,59 @@ function BroadcastStage({
 }
 
 function FocusSwitcher({
-  options,
+  presets,
+  suggested,
   pendingLabel,
-  onChoose,
-  onSubmitPrompt,
+  onChoosePreset,
+  onChooseSuggested,
 }: {
-  options: ChannelSuggestedAction[];
+  presets: FocusOption[];
+  suggested: ChannelSuggestedAction[];
   pendingLabel: string | null;
-  onChoose: (option: ChannelSuggestedAction) => void;
-  onSubmitPrompt: (prompt: string) => void;
+  onChoosePreset: (option: FocusOption) => void;
+  onChooseSuggested: (option: ChannelSuggestedAction) => void;
 }) {
-  const [draft, setDraft] = useState("");
+  if (presets.length === 0 && suggested.length === 0) return null;
   return (
-    <div className="pointer-events-auto absolute left-1/2 top-5 z-40 flex max-w-[92vw] -translate-x-1/2 flex-wrap items-center justify-center gap-2 rounded-full border border-white/10 bg-black/55 p-1 shadow-2xl shadow-black/30 backdrop-blur-xl sm:top-6">
-      {options.map((option) => {
+    <div className="pointer-events-auto absolute left-1/2 top-5 z-40 flex -translate-x-1/2 rounded-full border border-white/10 bg-black/45 p-1 shadow-2xl shadow-black/30 backdrop-blur-xl sm:top-6">
+      {presets.map((option) => {
         const pending = pendingLabel === option.label;
         return (
           <button
-            key={option.label}
+            key={`preset-${option.label}`}
             type="button"
             disabled={Boolean(pendingLabel)}
-            onClick={() => onChoose(option)}
-            title={option.prompt}
+            onClick={() => onChoosePreset(option)}
+            title={option.hint}
             className={`min-w-24 rounded-full px-4 py-2 text-xs font-bold uppercase tracking-[0.14em] transition ${
               pending
                 ? "bg-accent-green text-black"
-                : "text-white/65 hover:bg-white/10 hover:text-white disabled:opacity-40"
+                : "text-white/62 hover:bg-white/10 hover:text-white disabled:opacity-40"
             }`}
           >
             {pending ? "Changing…" : option.label}
           </button>
         );
       })}
-      <form
-        className="flex items-center gap-1"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!draft.trim() || pendingLabel) return;
-          onSubmitPrompt(draft);
-          setDraft("");
-        }}
-      >
-        <input
-          type="text"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder="Tell the channel agent…"
-          disabled={Boolean(pendingLabel)}
-          className="w-56 rounded-full bg-transparent px-3 py-2 text-xs text-white/85 placeholder:text-white/35 focus:outline-none disabled:opacity-40 sm:w-72"
-        />
-        <button
-          type="submit"
-          disabled={!draft.trim() || Boolean(pendingLabel)}
-          className="rounded-full bg-accent-green px-3 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-black transition hover:opacity-90 disabled:opacity-30"
-        >
-          Send
-        </button>
-      </form>
+      {suggested.map((option) => {
+        const pending = pendingLabel === option.label;
+        return (
+          <button
+            key={`agent-${option.label}`}
+            type="button"
+            disabled={Boolean(pendingLabel)}
+            onClick={() => onChooseSuggested(option)}
+            title={option.prompt}
+            className={`min-w-24 rounded-full px-4 py-2 text-xs font-bold uppercase tracking-[0.14em] transition ${
+              pending
+                ? "bg-accent-blue text-black"
+                : "border border-accent-blue/30 text-accent-blue/80 hover:bg-accent-blue/10 hover:text-accent-blue disabled:opacity-40"
+            }`}
+          >
+            {pending ? "Asking…" : option.label}
+          </button>
+        );
+      })}
     </div>
   );
 }

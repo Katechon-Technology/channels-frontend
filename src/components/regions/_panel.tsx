@@ -9,12 +9,12 @@ import type { ReactNode } from "react";
 export function Panel({
   title,
   icon,
-  sourceRef,
   children,
   className = "",
 }: {
   title?: string;
   icon?: ReactNode;
+  /** Reserved for future debug chrome; currently never rendered. */
   sourceRef?: string;
   children: ReactNode;
   className?: string;
@@ -23,19 +23,12 @@ export function Panel({
     <section
       className={`flex h-full min-h-[120px] flex-col rounded-3xl border border-white/10 bg-surface-1/75 p-4 shadow-[0_18px_45px_rgba(0,0,0,0.28)] backdrop-blur ${className}`}
     >
-      {(title || sourceRef) && (
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2 text-xs uppercase tracking-[0.18em] text-white/45">
-            {icon ? <span className="text-accent-green">{icon}</span> : null}
-            <span className="truncate">{title ?? ""}</span>
-          </div>
-          {sourceRef ? (
-            <span className="rounded-full border border-accent-green/25 bg-accent-green/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-accent-green">
-              {sourceRef}
-            </span>
-          ) : null}
+      {title ? (
+        <div className="mb-3 flex min-w-0 items-center gap-2 text-xs uppercase tracking-[0.18em] text-white/45">
+          {icon ? <span className="text-accent-green">{icon}</span> : null}
+          <span className="truncate">{title}</span>
         </div>
-      )}
+      ) : null}
       <div className="flex-1 min-h-0">{children}</div>
     </section>
   );

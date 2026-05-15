@@ -12,8 +12,9 @@ export default function NewsFeed({ region, channel }: RegionComponentProps) {
   const source = getDataSource(channel, region.sourceRef);
   const rows = extractNewsRows(source, limit);
 
+  const title = typeof region.props.title === "string" ? region.props.title : undefined;
   return (
-    <Panel title="Wire" icon={<Newspaper size={15} />} sourceRef={region.sourceRef}>
+    <Panel title={title} icon={title ? <Newspaper size={15} /> : undefined}>
       {rows.length === 0 ? (
         <EmptyState
           message={

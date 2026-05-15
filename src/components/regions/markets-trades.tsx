@@ -9,8 +9,9 @@ export default function MarketsTrades({ region, channel }: RegionComponentProps)
   const source = getDataSource(channel, region.sourceRef);
   const limit = Math.max(1, Math.min(40, Math.round(readNumber(region.props.limit, 8))));
   const trades = readTradesFromSource(source);
+  const title = typeof region.props.title === "string" ? region.props.title : undefined;
   return (
-    <Panel title="Trades" icon={<Activity size={15} />} sourceRef={region.sourceRef}>
+    <Panel title={title} icon={title ? <Activity size={15} /> : undefined}>
       {trades.length === 0 ? (
         <EmptyState message="no trade tape curated" />
       ) : (
