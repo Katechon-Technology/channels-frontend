@@ -301,12 +301,20 @@ function subscribeOrderbook(market: string, depth: number, onBook: (book: Orderb
 }
 
 function readIndicators(channel: Channel): Array<{ type: string; period?: number }> {
-  const chart = channel.spec.ui.blocks.find((block) => block.type === "markets.chart");
-  const indicators = chart?.props.indicators;
-  if (!Array.isArray(indicators)) return [];
-  return indicators.filter((indicator): indicator is { type: string; period?: number } =>
-    !!indicator && typeof indicator === "object" && !Array.isArray(indicator) && typeof (indicator as { type?: unknown }).type === "string",
-  );
+  // Pull indicators from any region whose component props declare them. This
+  // works for the v2 `broadcast.hyperliquid` region (props can carry indicators)
+  // and also for any future `markets.chart` region that decomposes the view.
+  for (const region of Object.values(channel.spec.ui.regions ?? {})) {
+    const indicators = (region.props as { indicators?: unknown }).indicators;
+    if (!Array.isArray(indicators)) continue;
+    return indicators.filter((indicator): indicator is { type: string; period?: number } =>
+      !!indicator
+      && typeof indicator === "object"
+      && !Array.isArray(indicator)
+      && typeof (indicator as { type?: unknown }).type === "string",
+    );
+  }
+  return [];
 }
 
 function readMarketConfig(channel: Channel): { market: string; timeframe: Timeframe } {

@@ -1,5 +1,13 @@
+import type { GridTemplateId } from "./grid-presets";
+
+export type ChannelRegion = {
+  component: string;
+  props: Record<string, unknown>;
+  sourceRef?: string;
+};
+
 export type ChannelSpec = {
-  version: "v1";
+  version: "v2";
   channelType: "news" | "hyperliquid" | "polymarket";
   title: string;
   dataSources: Array<{
@@ -9,8 +17,9 @@ export type ChannelSpec = {
     constraints: Record<string, unknown>;
   }>;
   ui: {
-    layout: "channel-stack" | "split-dashboard" | "market-terminal";
-    blocks: ChannelBlock[];
+    gridTemplate: GridTemplateId;
+    gap?: string;
+    regions: Record<string, ChannelRegion>;
   };
   playout?: {
     sourceRef: string;
@@ -20,10 +29,11 @@ export type ChannelSpec = {
     resetOnMutation: boolean;
   };
   capabilities: {
+    allowedGridTemplates: GridTemplateId[];
+    allowedComponents: string[];
     allowedDataSourceTypes: string[];
-    allowedBlocks: string[];
     allowedConstraintKeys: Record<string, string[]>;
-    allowedBlockProps: Record<string, string[]>;
+    allowedComponentProps: Record<string, string[]>;
     operations: string[];
   };
   narration: {
@@ -32,23 +42,6 @@ export type ChannelSpec = {
     voice?: string;
     cadenceSeconds: number;
   };
-};
-
-export type ChannelBlock = {
-  id: string;
-  type:
-    | "news.feed"
-    | "news.brief"
-    | "news.sources"
-    | "markets.ticker"
-    | "markets.chart"
-    | "markets.orderbook"
-    | "markets.trades"
-    | "markets.funding"
-    | "narration.captions";
-  title?: string;
-  sourceRef?: string;
-  props: Record<string, unknown>;
 };
 
 export type Channel = {
@@ -64,6 +57,12 @@ export type Channel = {
   agentJobs: ChannelAgentJob[];
   narrationMessages: ChannelNarrationMessage[];
   dataSourcesData: ChannelDataSourceData[];
+  suggestedActions: ChannelSuggestedAction[];
+};
+
+export type ChannelSuggestedAction = {
+  label: string;
+  prompt: string;
 };
 
 export type ChannelTemplate = {

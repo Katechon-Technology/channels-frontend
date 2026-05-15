@@ -68,6 +68,7 @@ export const CHANNEL_FIELDS = `
     lastRunAt
     error
   }
+  suggestedActions
 `;
 
 export async function loadChannels(token?: string | null) {

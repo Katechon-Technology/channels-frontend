@@ -3,12 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import {
-  ChevronRight,
-  Clock,
   Loader2,
   Radio,
   RotateCcw,
-  RefreshCw,
   Settings,
   Share2,
   Tv,
@@ -19,8 +16,8 @@ import {
   fetchApiKeyProviders,
   loadChannels,
   narrateChannel,
-  previewChannelPatch,
   rejectMutation,
+  requestMutation,
   subscribeChannelAgentJobUpdated,
   subscribeChannelNarration,
   subscribeChannelUpdated,
@@ -28,20 +25,14 @@ import {
 } from "@/lib/graphql";
 import { latestNarrationFor } from "@/lib/channel-data";
 import { AvatarHost } from "@/components/avatar-host";
-import { HormuzMapBackground } from "@/components/hormuz-map-background";
-import { HyperliquidBroadcast } from "@/components/hyperliquid-broadcast";
-import {
-  PolymarketBroadcast,
-  polymarketModeLabel,
-  type PolymarketMarket,
-  type PolymarketMode,
-} from "@/components/polymarket-broadcast";
+import { ChannelGrid } from "@/components/channel-grid";
 import { SettingsDrawer } from "@/components/settings-drawer";
 import type {
   Channel,
   ChannelAgentJob,
   ChannelDataSourceData,
   ChannelNarrationMessage,
+  ChannelSuggestedAction,
 } from "@/lib/types";
 
 // SSE subscriptions only deliver mutation + narration events, not plugin
@@ -75,26 +66,6 @@ type BroadcastItem = {
   published: string | null;
   link: string;
   kicker: string;
-};
-
-type FocusOption = {
-  label: string;
-  hint: string;
-  prompt: string;
-  kind:
-    | "news-world"
-    | "news-europe"
-    | "news-iran"
-    | "news-hormuz-map"
-    | "market-btc"
-    | "market-eth"
-    | "market-sol"
-    | "market-indicators"
-    | "market-poly-24h"
-    | "market-poly-volume"
-    | "market-poly-featured"
-    | "market-poly-politics"
-    | "market-poly-crypto";
 };
 
 type ShareSnapshot = {
@@ -155,15 +126,10 @@ function SharedChannelConsole({ snapshot }: { snapshot: ShareSnapshot }) {
   const [expired, setExpired] = useState(false);
   const [playIndex, setPlayIndex] = useState(0);
   const [segmentStartedAt, setSegmentStartedAt] = useState(() => Date.now());
-  const [now, setNow] = useState(() => Date.now());
   const channel = snapshot.channel;
   const durationSeconds = clampNumber(channel.spec.playout?.itemDurationSeconds ?? 10, 3, 300);
   const items = useMemo(() => extractBroadcastItems(channel), [channel]);
   const currentItem = items.length ? items[playIndex % items.length] : null;
-  const progress = Math.min(
-    1,
-    Math.max(0, (now - segmentStartedAt) / (durationSeconds * 1000)),
-  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => setExpired(true), 10_000);
@@ -174,7 +140,6 @@ function SharedChannelConsole({ snapshot }: { snapshot: ShareSnapshot }) {
     if (expired || items.length === 0) return;
     const id = window.setInterval(() => {
       const nextNow = Date.now();
-      setNow(nextNow);
       if (nextNow - segmentStartedAt >= durationSeconds * 1000) {
         setPlayIndex((index) => (items.length > 1 ? (index + 1) % items.length : 0));
         setSegmentStartedAt(nextNow);
@@ -193,14 +158,10 @@ function SharedChannelConsole({ snapshot }: { snapshot: ShareSnapshot }) {
         <section className="min-w-0 rounded-[28px] border border-white/10 bg-black/20 p-3 shadow-2xl shadow-black/30 sm:p-4">
           <BroadcastStage
             channel={channel}
-            item={currentItem}
-            progress={progress}
-            durationSeconds={durationSeconds}
             focusOptions={[]}
             pendingFocusLabel={null}
             onChooseFocus={() => {}}
-            narration={null}
-            narrationHint={null}
+            onSubmitPrompt={() => {}}
           />
         </section>
       </div>
@@ -235,13 +196,11 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   const [booting, setBooting] = useState(true);
   const [playIndex, setPlayIndex] = useState(0);
   const [segmentStartedAt, setSegmentStartedAt] = useState(() => Date.now());
-  const [now, setNow] = useState(() => Date.now());
   const [pendingFocus, setPendingFocus] = useState<{
     channelId: string;
     label: string;
   } | null>(null);
   const [apiKeyProviders, setApiKeyProviders] = useState<string[]>([]);
-  const [narrationKeyHint, setNarrationKeyHint] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
   const [pendingPreview, setPendingPreview] = useState<{
@@ -251,12 +210,7 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   } | null>(null);
   const [applying, setApplying] = useState(false);
   const [agentBusy, setAgentBusy] = useState(false);
-  const [polymarketActiveTitle, setPolymarketActiveTitle] = useState<string | null>(null);
   const directorBusyRef = useRef(false);
-
-  const handlePolymarketActiveMarket = useCallback((market: PolymarketMarket | null) => {
-    setPolymarketActiveTitle(market?.question ?? null);
-  }, []);
 
   const active = useMemo(
     () => channels.find((channel) => channel.id === activeId) ?? channels[0] ?? null,
@@ -267,10 +221,6 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   const items = useMemo(() => (active ? extractBroadcastItems(active) : []), [active]);
   const itemKey = useMemo(() => itemsFingerprint(items), [items]);
   const currentItem = items.length ? items[playIndex % items.length] : null;
-  const progress = Math.min(
-    1,
-    Math.max(0, (now - segmentStartedAt) / (durationSeconds * 1000)),
-  );
 
   const refresh = useCallback(
     async (options: { autoTune?: boolean; quiet?: boolean } = {}) => {
@@ -398,8 +348,6 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   useEffect(() => {
     setPlayIndex(0);
     setSegmentStartedAt(Date.now());
-    setNow(Date.now());
-    setPolymarketActiveTitle(null);
   }, [active?.id, active?.activeSpecVersion.id, itemKey]);
 
   const provider = apiKeyProviders[0] as "ANTHROPIC" | "OPENAI" | undefined;
@@ -428,12 +376,9 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
         }));
         const token = await auth.getToken();
         await narrateChannel(active.id, provider, payload, recent, token);
-        setNarrationKeyHint(null);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (/MISSING_API_KEY/i.test(message) || /no api key/i.test(message)) {
-          setNarrationKeyHint("Configure an API key in Settings to enable narration.");
-        }
+      } catch {
+        // The narrator failures surface separately via the agent-job log; the
+        // missing-API-key prompt lives in the Settings drawer indicator.
       } finally {
         directorBusyRef.current = false;
       }
@@ -463,15 +408,6 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     () => (active ? latestNarrationFor(active.narrationMessages) : null),
     [active?.narrationMessages],
   );
-
-  // Surface a key-missing hint when the agent can't run yet.
-  useEffect(() => {
-    if (agentDriven) {
-      setNarrationKeyHint(null);
-    } else if (apiKeyProviders.length === 0) {
-      setNarrationKeyHint("Configure an API key in Settings to enable narration.");
-    }
-  }, [agentDriven, apiKeyProviders.length]);
 
   // Agent-driven scene controller: jump to the chosenItemId on every new
   // narration message, then schedule the next director call once the current
@@ -517,7 +453,6 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     if (agentDriven || items.length === 0) return;
     const id = window.setInterval(() => {
       const nextNow = Date.now();
-      setNow(nextNow);
       if (nextNow - segmentStartedAt >= durationSeconds * 1000) {
         setPlayIndex((index) => (items.length > 1 ? (index + 1) % items.length : 0));
         setSegmentStartedAt(nextNow);
@@ -526,40 +461,30 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     return () => window.clearInterval(id);
   }, [agentDriven, durationSeconds, items.length, segmentStartedAt]);
 
-  async function chooseFocus(option: FocusOption) {
+  async function chooseFocus(option: ChannelSuggestedAction) {
     if (!active || pendingFocus || pendingPreview) return;
     setPendingFocus({ channelId: active.id, label: option.label });
     try {
-      const patch = buildFocusPatch(active, option);
-      const data = await previewChannelPatch(
-        active.id,
-        patch,
-        option.prompt,
-        await auth.getToken(),
-      );
-      if (option.kind === "news-hormuz-map" || option.kind === "market-indicators") {
-        const applied = await applyMutation(
-          data.previewChannelSpecPatch.mutation.id,
-          await auth.getToken(),
-        );
-        setChannels((current) =>
-          current.map((channel) =>
-            channel.id === applied.applyChannelMutation.channel.id
-              ? applied.applyChannelMutation.channel
-              : channel,
-          ),
-        );
-        setActiveId(applied.applyChannelMutation.channel.id);
-        await refresh({ quiet: true });
-      } else {
-        setPendingPreview({
-          channelId: active.id,
-          label: option.label,
-          preview: data.previewChannelSpecPatch,
-        });
-      }
+      await requestMutation(active.id, option.prompt, await auth.getToken());
+      // The agent runs asynchronously. Status flows in through
+      // subscribeChannelAgentJobUpdated, the preview modal opens when the
+      // backend reports `previewed`, and the FocusSwitcher's pending state
+      // clears as soon as we hand the prompt off.
     } catch {
       // Surface failures quietly; the focus switcher stays unchanged.
+    } finally {
+      setPendingFocus(null);
+    }
+  }
+
+  async function submitAgentPrompt(prompt: string) {
+    const trimmed = prompt.trim();
+    if (!active || !trimmed || pendingFocus || pendingPreview) return;
+    setPendingFocus({ channelId: active.id, label: "Sending…" });
+    try {
+      await requestMutation(active.id, trimmed, await auth.getToken());
+    } catch {
+      // ignore
     } finally {
       setPendingFocus(null);
     }
@@ -619,25 +544,13 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     setPendingFocus({ channelId: active?.id ?? channels[0].id, label: "Reset" });
     try {
       const token = await auth.getToken();
-      const updated: Channel[] = [];
-
       for (const channel of channels) {
-        const preview = await previewChannelPatch(
+        await requestMutation(
           channel.id,
-          buildResetPatch(channel),
-          "Reset all channels to their clean demo state.",
+          "Reset this channel back to its clean default broadcast state.",
           token,
         );
-        const data = await applyMutation(preview.previewChannelSpecPatch.mutation.id, token);
-        updated.push(data.applyChannelMutation.channel);
       }
-
-      setChannels((current) =>
-        current.map((channel) =>
-          updated.find((next) => next.id === channel.id) ?? channel,
-        ),
-      );
-      await refresh({ quiet: true });
     } catch {
       // leave channels as-is
     } finally {
@@ -713,15 +626,10 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
           {active ? (
             <BroadcastStage
               channel={active}
-              item={currentItem}
-              progress={progress}
-              durationSeconds={durationSeconds}
-              focusOptions={focusOptionsForChannel(active)}
+              focusOptions={active.suggestedActions ?? []}
               pendingFocusLabel={pendingFocus?.channelId === active.id ? pendingFocus.label : null}
               onChooseFocus={chooseFocus}
-              narration={latestNarration}
-              narrationHint={narrationKeyHint}
-              onPolymarketActiveMarket={handlePolymarketActiveMarket}
+              onSubmitPrompt={submitAgentPrompt}
             />
           ) : (
             <ShellState icon={<Tv />} title="Nothing is on yet" />
@@ -730,10 +638,8 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
       </div>
       <AvatarHost
         speechText={
-          active?.spec.channelType === "polymarket"
-            ? polymarketActiveTitle
-            : latestNarration?.text ||
-              (currentItem ? speechTextForItem(currentItem) : null)
+          latestNarration?.text ||
+          (currentItem ? speechTextForItem(currentItem) : null)
         }
       />
       <button
@@ -914,150 +820,30 @@ function previewValue(value: unknown): string {
 
 function BroadcastStage({
   channel,
-  item,
-  progress,
-  durationSeconds,
   focusOptions,
   pendingFocusLabel,
   onChooseFocus,
-  narration,
-  narrationHint,
-  onPolymarketActiveMarket,
+  onSubmitPrompt,
 }: {
   channel: Channel;
-  item: BroadcastItem | null;
-  progress: number;
-  durationSeconds: number;
-  focusOptions: FocusOption[];
+  focusOptions: ChannelSuggestedAction[];
   pendingFocusLabel: string | null;
-  onChooseFocus: (option: FocusOption) => void;
-  narration: ChannelNarrationMessage | null;
-  narrationHint: string | null;
-  onPolymarketActiveMarket?: (market: PolymarketMarket | null) => void;
+  onChooseFocus: (option: ChannelSuggestedAction) => void;
+  onSubmitPrompt: (prompt: string) => void;
 }) {
-  const showHormuzMap = hasHormuzMap(channel);
-
-  if (channel.spec.channelType === "polymarket") {
-    return (
-      <div className="boot-in flex min-h-[calc(100vh-32px)] flex-col gap-4">
-        <section className="grid flex-1 gap-4">
-          <div className="katechon-stage relative min-h-[calc(100vh-64px)] overflow-hidden rounded-[30px] border border-white/10 bg-black matrix-scanline">
-            <PolymarketBroadcast
-              channel={channel}
-              onActiveMarketChange={onPolymarketActiveMarket}
-            />
-            <FocusSwitcher
-              options={focusOptions}
-              pendingLabel={pendingFocusLabel}
-              onChoose={onChooseFocus}
-            />
-          </div>
-        </section>
-      </div>
-    );
-  }
-
-  if (channel.spec.channelType === "hyperliquid") {
-    return (
-      <div className="boot-in flex min-h-[calc(100vh-32px)] flex-col gap-4">
-        <section className="grid flex-1 gap-4">
-          <div className="katechon-stage relative min-h-[calc(100vh-64px)] overflow-hidden rounded-[30px] border border-white/10 bg-black matrix-scanline">
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_70%_20%,rgba(125,220,255,0.15),transparent_30%),radial-gradient(circle_at_25%_80%,rgba(255,184,77,0.10),transparent_25%)]" />
-            <div className="pointer-events-none absolute inset-4 rounded-[24px] border border-white/10" />
-            <div className="pointer-events-none absolute bottom-0 right-0 hidden h-[48vh] w-[min(34vw,520px)] bg-[radial-gradient(ellipse_at_bottom_right,rgba(246,240,223,0.10),rgba(40,242,143,0.06)_34%,transparent_70%)] lg:block" />
-            <HyperliquidBroadcast channel={channel} />
-            <FocusSwitcher
-              options={focusOptions}
-              pendingLabel={pendingFocusLabel}
-              onChoose={onChooseFocus}
-            />
-          </div>
-        </section>
-      </div>
-    );
-  }
-
   return (
     <div className="boot-in flex min-h-[calc(100vh-32px)] flex-col gap-4">
       <section className="grid flex-1 gap-4">
         <div className="katechon-stage relative min-h-[calc(100vh-64px)] overflow-hidden rounded-[30px] border border-white/10 bg-black matrix-scanline">
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_70%_20%,rgba(125,220,255,0.15),transparent_30%),radial-gradient(circle_at_25%_80%,rgba(255,184,77,0.10),transparent_25%)]" />
-          {showHormuzMap ? <HormuzMapBackground /> : null}
-          <div className="pointer-events-none absolute inset-4 rounded-[24px] border border-white/10" />
-          <div className="pointer-events-none absolute bottom-0 right-0 hidden h-[48vh] w-[min(34vw,520px)] bg-[radial-gradient(ellipse_at_bottom_right,rgba(246,240,223,0.10),rgba(40,242,143,0.06)_34%,transparent_70%)] lg:block" />
+          <ChannelGrid channel={channel} />
           <FocusSwitcher
             options={focusOptions}
             pendingLabel={pendingFocusLabel}
             onChoose={onChooseFocus}
+            onSubmitPrompt={onSubmitPrompt}
           />
-          <div className="pointer-events-none absolute left-6 right-6 top-6 z-10 flex items-start justify-between gap-6 text-[10px] uppercase tracking-[0.2em] text-white/45 sm:left-8 sm:right-8 sm:top-8">
-            <span className="text-accent-green">Katechon</span>
-            <span className="max-w-[48vw] truncate text-right">{channel.spec.title}</span>
-          </div>
-          <div className="relative flex h-full min-h-[520px] flex-col p-5 pt-20 sm:p-8 sm:pt-24 lg:p-10 lg:pt-28">
-            {item ? (
-              <article className="flex flex-1 flex-col justify-end lg:w-[calc(100%-420px)] xl:w-[calc(100%-520px)]">
-                <div className="mb-4 flex flex-wrap gap-2">
-                  <span className="border border-accent-green/30 bg-accent-green/10 px-3 py-1 text-xs uppercase tracking-[0.16em] text-accent-green">
-                    Now playing
-                  </span>
-                  <span className="border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-white/45">
-                    {formatDate(item.published)}
-                  </span>
-                </div>
-                <h3 className="max-w-5xl font-heading text-5xl font-extrabold leading-[0.93] tracking-tight text-white sm:text-7xl">
-                  {item.title}
-                </h3>
-                <p className="mt-5 line-clamp-3 max-w-4xl text-base leading-7 text-white/65 sm:text-lg">
-                  {item.summary || "More details are coming in."}
-                </p>
-                <div className="mt-8 flex flex-wrap items-center gap-4">
-                  <a
-                    href={item.link || undefined}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex max-w-full items-center gap-2 truncate border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white/60 hover:text-white"
-                  >
-                    <span className="truncate">{item.source}</span>
-                    <ChevronRight size={15} />
-                  </a>
-                  <Countdown progress={progress} seconds={durationSeconds} />
-                </div>
-              </article>
-            ) : (
-              <OffAirState channel={channel} />
-            )}
-            <CaptionStrip narration={narration} hint={narrationHint} />
-          </div>
         </div>
       </section>
-    </div>
-  );
-}
-
-function CaptionStrip({
-  narration,
-  hint,
-}: {
-  narration: ChannelNarrationMessage | null;
-  hint: string | null;
-}) {
-  if (!narration && !hint) return null;
-  return (
-    <div className="pointer-events-none absolute bottom-6 left-6 right-[min(36vw,600px)] z-20 sm:bottom-8 sm:left-8">
-      <div className="pointer-events-auto rounded-2xl border border-white/10 bg-black/55 px-5 py-3 backdrop-blur">
-        {narration ? (
-          <>
-            <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-accent-green">
-              <span>narrator</span>
-              <span className="text-white/35">{narration.source}</span>
-            </div>
-            <p className="text-base leading-6 text-white/90">{narration.text}</p>
-          </>
-        ) : (
-          <p className="text-xs text-white/60">{hint}</p>
-        )}
-      </div>
     </div>
   );
 }
@@ -1066,14 +852,16 @@ function FocusSwitcher({
   options,
   pendingLabel,
   onChoose,
+  onSubmitPrompt,
 }: {
-  options: FocusOption[];
+  options: ChannelSuggestedAction[];
   pendingLabel: string | null;
-  onChoose: (option: FocusOption) => void;
+  onChoose: (option: ChannelSuggestedAction) => void;
+  onSubmitPrompt: (prompt: string) => void;
 }) {
-  if (options.length === 0) return null;
+  const [draft, setDraft] = useState("");
   return (
-    <div className="pointer-events-auto absolute left-1/2 top-5 z-40 flex -translate-x-1/2 rounded-full border border-white/10 bg-black/45 p-1 shadow-2xl shadow-black/30 backdrop-blur-xl sm:top-6">
+    <div className="pointer-events-auto absolute left-1/2 top-5 z-40 flex max-w-[92vw] -translate-x-1/2 flex-wrap items-center justify-center gap-2 rounded-full border border-white/10 bg-black/55 p-1 shadow-2xl shadow-black/30 backdrop-blur-xl sm:top-6">
       {options.map((option) => {
         const pending = pendingLabel === option.label;
         return (
@@ -1082,55 +870,42 @@ function FocusSwitcher({
             type="button"
             disabled={Boolean(pendingLabel)}
             onClick={() => onChoose(option)}
-            title={option.hint}
+            title={option.prompt}
             className={`min-w-24 rounded-full px-4 py-2 text-xs font-bold uppercase tracking-[0.14em] transition ${
               pending
                 ? "bg-accent-green text-black"
-                : "text-white/62 hover:bg-white/10 hover:text-white disabled:opacity-40"
+                : "text-white/65 hover:bg-white/10 hover:text-white disabled:opacity-40"
             }`}
           >
             {pending ? "Changing…" : option.label}
           </button>
         );
       })}
-    </div>
-  );
-}
-
-function Countdown({ progress, seconds }: { progress: number; seconds: number }) {
-  const remaining = Math.max(0, Math.ceil(seconds * (1 - progress)));
-  return (
-    <div className="flex items-center gap-3">
-      <div
-        className="grid size-14 place-items-center rounded-full text-sm font-bold text-accent-green"
-        style={{
-          background: `conic-gradient(#00e87b ${progress * 360}deg, rgba(255,255,255,0.12) 0deg)`,
+      <form
+        className="flex items-center gap-1"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!draft.trim() || pendingLabel) return;
+          onSubmitPrompt(draft);
+          setDraft("");
         }}
       >
-        <div className="grid size-11 place-items-center rounded-full bg-black">
-          {remaining}
-        </div>
-      </div>
-      <div className="text-xs uppercase tracking-[0.16em] text-white/40">
-        <Clock size={14} className="mb-1 text-accent-green" />
-        next story
-      </div>
-    </div>
-  );
-}
-
-function OffAirState({ channel }: { channel: Channel }) {
-  return (
-    <div className="grid flex-1 place-items-center text-center">
-      <div className="max-w-xl">
-        <div className="mx-auto mb-4 grid size-16 place-items-center border border-accent-amber/30 bg-accent-amber/10 text-accent-amber">
-          <RefreshCw size={24} />
-        </div>
-        <h3 className="font-heading text-3xl font-semibold">Coming up shortly</h3>
-        <p className="mt-3 text-sm leading-6 text-white/55">
-          {channel.spec.title} is getting the next segment ready.
-        </p>
-      </div>
+        <input
+          type="text"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder="Tell the channel agent…"
+          disabled={Boolean(pendingLabel)}
+          className="w-56 rounded-full bg-transparent px-3 py-2 text-xs text-white/85 placeholder:text-white/35 focus:outline-none disabled:opacity-40 sm:w-72"
+        />
+        <button
+          type="submit"
+          disabled={!draft.trim() || Boolean(pendingLabel)}
+          className="rounded-full bg-accent-green px-3 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-black transition hover:opacity-90 disabled:opacity-30"
+        >
+          Send
+        </button>
+      </form>
     </div>
   );
 }
@@ -1380,414 +1155,6 @@ function truncateForShare(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-function focusOptionsForChannel(channel: Channel): FocusOption[] {
-  if (channel.spec.channelType === "news") {
-    if (hasHormuzMap(channel)) return [];
-    if (isIranFocus(channel)) {
-      return [
-        {
-          label: "Add a map of Strait of Hormuz",
-          hint: "Add a live map layer around the Strait of Hormuz.",
-          kind: "news-hormuz-map",
-          prompt:
-            "Add a cinematic map layer focused on the Strait of Hormuz, with key ports, islands, and shipping corridor points highlighted behind the Iran news broadcast.",
-        },
-      ];
-    }
-    return [
-      {
-        label: "World",
-        hint: "Return to a broad international briefing.",
-        kind: "news-world",
-        prompt:
-          "Make this a broad world news channel again. Set the news region to global, clear keyword include and exclude filters, keep the simple broadcast presentation, and keep story rotation readable for a general viewer.",
-      },
-      {
-        label: "Europe",
-        hint: "Focus the channel on European news.",
-        kind: "news-europe",
-        prompt:
-          "Focus this news channel on Europe. Update the news source and keyword filter toward Europe, EU, NATO, France, Germany, UK, Britain, Spain, Italy, Poland, the Netherlands, Brussels, and major European capitals. Keep the UI as a simple viewer-facing broadcast.",
-      },
-      {
-        label: "Iran",
-        hint: "Follow Iran and the wider region.",
-        kind: "news-iran",
-        prompt:
-          "Focus this news channel on Iran. Prioritize stories about Iran, Tehran, the IRGC, Iranian leadership, sanctions, the Persian Gulf, and Iran's relationships with neighbors and the US. Keep the UI as a simple viewer-facing broadcast.",
-      },
-    ];
-  }
-
-  if (channel.spec.channelType === "polymarket") {
-    return [
-      {
-        label: "Top 24h",
-        hint: "Most active markets by 24-hour volume.",
-        kind: "market-poly-24h",
-        prompt:
-          "Switch the Polymarket channel to the top 24-hour volume ordering. Update dataSources[id=polymarket].constraints.mode to 'top-24h' and refresh the title.",
-      },
-      {
-        label: "All-Time",
-        hint: "Biggest markets by lifetime volume.",
-        kind: "market-poly-volume",
-        prompt:
-          "Switch the Polymarket channel to the all-time volume ordering. Update dataSources[id=polymarket].constraints.mode to 'top-volume' and refresh the title.",
-      },
-      {
-        label: "Featured",
-        hint: "Polymarket's editorially featured markets.",
-        kind: "market-poly-featured",
-        prompt:
-          "Switch the Polymarket channel to the featured markets list. Update dataSources[id=polymarket].constraints.mode to 'featured' and refresh the title.",
-      },
-      {
-        label: "Politics",
-        hint: "Politics-tagged markets only.",
-        kind: "market-poly-politics",
-        prompt:
-          "Filter the Polymarket channel to politics-tagged markets. Update dataSources[id=polymarket].constraints.mode to 'politics' and refresh the title.",
-      },
-      {
-        label: "Crypto",
-        hint: "Crypto-tagged markets only.",
-        kind: "market-poly-crypto",
-        prompt:
-          "Filter the Polymarket channel to crypto-tagged markets. Update dataSources[id=polymarket].constraints.mode to 'crypto' and refresh the title.",
-      },
-    ];
-  }
-
-  if (channel.spec.channelType === "hyperliquid") {
-    if (hasMarketSelected(channel) && !hasMarketIndicators(channel)) {
-      return [
-        {
-          label: "Add indicators",
-          hint: "Add EMA overlays and VWAP to the chart.",
-          kind: "market-indicators",
-          prompt:
-            "Add chart overlays for this selected market: EMA 20, EMA 50, and VWAP. Keep the market and timeframe unchanged.",
-        },
-      ];
-    }
-    return [
-      {
-        label: "BTC",
-        hint: "Watch Bitcoin on a five-minute chart.",
-        kind: "market-btc",
-        prompt:
-          "Switch the market channel to BTC with a 5m timeframe. Update selectedMarket, the chart props, and the title so the viewer sees a BTC market watch.",
-      },
-      {
-        label: "ETH",
-        hint: "Watch Ethereum on a fifteen-minute chart.",
-        kind: "market-eth",
-        prompt:
-          "Switch the market channel to ETH with a 15m timeframe. Update selectedMarket, the chart props, and the title so the viewer sees an ETH market watch.",
-      },
-      {
-        label: "SOL",
-        hint: "Watch Solana on a one-minute chart.",
-        kind: "market-sol",
-        prompt:
-          "Switch the market channel to SOL with a 1m timeframe. Update selectedMarket, the chart props, and the title so the viewer sees a SOL market watch.",
-      },
-    ];
-  }
-
-  return [];
-}
-
-function buildResetPatch(channel: Channel): Partial<Channel["spec"]> {
-  if (channel.spec.channelType === "polymarket") {
-    return {
-      title: "Polymarket · Top 24h Volume",
-      dataSources: channel.spec.dataSources.map((source) =>
-        source.id === "polymarket"
-          ? {
-              ...source,
-              constraints: {
-                ...source.constraints,
-                mode: "top-24h",
-                limit: 20,
-              },
-            }
-          : source,
-      ),
-    };
-  }
-
-  if (channel.spec.channelType === "hyperliquid") {
-    return {
-      title: "Hyperliquid Top Markets",
-      dataSources: channel.spec.dataSources.map((source) =>
-        source.id === "hyperliquid"
-          ? {
-              ...source,
-              constraints: {
-                ...source.constraints,
-                mode: "top-markets",
-                limit: 10,
-                selectedMarket: "BTC",
-                timeframe: "5m",
-              },
-            }
-          : source,
-      ),
-      ui: {
-        ...channel.spec.ui,
-        layout: "market-terminal",
-        blocks: channel.spec.ui.blocks.map((block) =>
-          block.type === "markets.chart"
-            ? {
-                ...block,
-                title: "BTC Chart",
-                props: { ...block.props, market: "BTC", timeframe: "5m", indicators: [] },
-              }
-            : block,
-        ),
-      },
-    };
-  }
-
-  return {
-    title: "International News",
-    dataSources: channel.spec.dataSources.map((source) => {
-      if (source.id === "wire") {
-        return {
-          ...source,
-          constraints: { ...source.constraints, region: "global", topic: null, event: null, limit: 100 },
-        };
-      }
-      if (source.id === "filtered_wire") {
-        return {
-          ...source,
-          constraints: { ...source.constraints, include: [], exclude: [], region: "global", topic: null, event: null },
-        };
-      }
-      return source;
-    }),
-    playout: { ...channel.spec.playout, sourceRef: "filtered_wire", itemDurationSeconds: 10, limit: 100, strategy: "latest-first", resetOnMutation: true },
-  };
-}
-
-function buildFocusPatch(channel: Channel, option: FocusOption): Partial<Channel["spec"]> {
-  if (option.kind === "market-indicators") {
-    return {
-      ui: {
-        ...channel.spec.ui,
-        blocks: channel.spec.ui.blocks.map((block) =>
-          block.type === "markets.chart"
-            ? {
-                ...block,
-                props: {
-                  ...block.props,
-                  indicators: [
-                    { type: "ema", period: 20 },
-                    { type: "ema", period: 50 },
-                    { type: "vwap" },
-                  ],
-                },
-              }
-            : block,
-        ),
-      },
-    };
-  }
-
-  if (option.kind === "news-hormuz-map") {
-    return {
-      title: "Iran Watch · Strait of Hormuz",
-      dataSources: channel.spec.dataSources.map((source) => {
-        if (source.id === "wire" || source.id === "filtered_wire") {
-          return {
-            ...source,
-            constraints: { ...source.constraints, event: "strait-of-hormuz-map" },
-          };
-        }
-        return source;
-      }),
-    };
-  }
-
-  if (option.kind.startsWith("news-")) {
-    const focus = newsFocusConstraints(option.kind);
-    return {
-      title: focus.title,
-      dataSources: channel.spec.dataSources.map((source) => {
-        if (source.id === "wire") {
-          return {
-            ...source,
-            constraints: { ...source.constraints, region: focus.region, topic: focus.topic, limit: 100 },
-          };
-        }
-        if (source.id === "filtered_wire") {
-          return {
-            ...source,
-            constraints: {
-              ...source.constraints,
-              include: focus.include,
-              exclude: focus.exclude,
-              region: focus.region,
-              topic: focus.topic,
-            },
-          };
-        }
-        return source;
-      }),
-      playout: { ...channel.spec.playout, sourceRef: "filtered_wire", itemDurationSeconds: 10, limit: 100, strategy: "latest-first", resetOnMutation: true },
-    };
-  }
-
-  if (option.kind.startsWith("market-poly-")) {
-    const mode: PolymarketMode =
-      option.kind === "market-poly-volume"
-        ? "top-volume"
-        : option.kind === "market-poly-featured"
-          ? "featured"
-          : option.kind === "market-poly-politics"
-            ? "politics"
-            : option.kind === "market-poly-crypto"
-              ? "crypto"
-              : "top-24h";
-    return {
-      title: `Polymarket · ${polymarketModeLabel(mode)}`,
-      dataSources: channel.spec.dataSources.map((source) =>
-        source.id === "polymarket"
-          ? { ...source, constraints: { ...source.constraints, mode } }
-          : source,
-      ),
-    };
-  }
-
-  const market = option.kind === "market-eth" ? "ETH" : option.kind === "market-sol" ? "SOL" : "BTC";
-  const timeframe = option.kind === "market-eth" ? "15m" : option.kind === "market-sol" ? "1m" : "5m";
-  return {
-    title: `${market} Market Watch`,
-    dataSources: channel.spec.dataSources.map((source) =>
-      source.id === "hyperliquid"
-        ? {
-            ...source,
-            constraints: { ...source.constraints, selectedMarket: market, timeframe },
-          }
-        : source,
-    ),
-    ui: {
-      ...channel.spec.ui,
-      blocks: channel.spec.ui.blocks.map((block) =>
-        block.type === "markets.chart"
-          ? {
-              ...block,
-              title: `${market} Chart`,
-              props: { ...block.props, market, timeframe, indicators: [] },
-            }
-          : block,
-      ),
-    },
-  };
-}
-
-function hasMarketSelected(channel: Channel): boolean {
-  if (channel.spec.channelType !== "hyperliquid") return false;
-  const source = channel.spec.dataSources.find((item) => item.id === "hyperliquid");
-  return typeof source?.constraints.selectedMarket === "string";
-}
-
-function hasMarketIndicators(channel: Channel): boolean {
-  if (channel.spec.channelType !== "hyperliquid") return false;
-  const chart = channel.spec.ui.blocks.find((block) => block.type === "markets.chart");
-  return Array.isArray(chart?.props.indicators) && chart.props.indicators.length > 0;
-}
-
-function hasHormuzMap(channel: Channel): boolean {
-  if (channel.spec.channelType !== "news") return false;
-  return channel.spec.dataSources.some((source) => source.constraints.event === "strait-of-hormuz-map");
-}
-
-function isIranFocus(channel: Channel): boolean {
-  if (channel.spec.channelType !== "news") return false;
-  if (channel.spec.title.toLowerCase().includes("iran")) return true;
-  return channel.spec.dataSources.some((source) => {
-    const region = typeof source.constraints.region === "string" ? source.constraints.region.toLowerCase() : "";
-    const includeText = JSON.stringify(source.constraints.include ?? "").toLowerCase();
-    return region.includes("iran") || includeText.includes("iran") || includeText.includes("tehran");
-  });
-}
-
-function newsFocusConstraints(kind: FocusOption["kind"]) {
-  if (kind === "news-europe") {
-    return {
-      title: "Europe Watch",
-      region: "europe",
-      topic: null,
-      include: [
-        [
-          "Europe",
-          "European",
-          "EU",
-          "NATO",
-          "France",
-          "Germany",
-          "UK",
-          "Britain",
-          "Spain",
-          "Italy",
-          "Poland",
-          "Netherlands",
-          "Brussels",
-          "Berlin",
-          "Paris",
-          "Madrid",
-          "Rome",
-          "London",
-          "Warsaw",
-        ],
-      ],
-      exclude: [],
-    };
-  }
-  if (kind === "news-iran") {
-    return {
-      title: "Iran Watch",
-      region: "iran",
-      topic: null,
-      include: [
-        [
-          "Iran",
-          "Iranian",
-          "Tehran",
-          "Khamenei",
-          "IRGC",
-          "Persian Gulf",
-          "Hormuz",
-          "Quds",
-          "Revolutionary Guard",
-        ],
-      ],
-      exclude: [],
-    };
-  }
-  return {
-    title: "International News",
-    region: "global",
-    topic: null,
-    include: [],
-    exclude: [],
-  };
-}
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "undated";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
 
 function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
