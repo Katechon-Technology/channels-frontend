@@ -1,6 +1,6 @@
 export type ChannelSpec = {
   version: "v1";
-  channelType: "news" | "hyperliquid";
+  channelType: "news" | "hyperliquid" | "polymarket";
   title: string;
   dataSources: Array<{
     id: string;

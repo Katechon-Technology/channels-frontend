@@ -30,6 +30,12 @@ import { latestNarrationFor } from "@/lib/channel-data";
 import { AvatarHost } from "@/components/avatar-host";
 import { HormuzMapBackground } from "@/components/hormuz-map-background";
 import { HyperliquidBroadcast } from "@/components/hyperliquid-broadcast";
+import {
+  PolymarketBroadcast,
+  polymarketModeLabel,
+  type PolymarketMarket,
+  type PolymarketMode,
+} from "@/components/polymarket-broadcast";
 import { SettingsDrawer } from "@/components/settings-drawer";
 import type {
   Channel,
@@ -44,7 +50,11 @@ import type {
 const POLL_MS = 30_000;
 const TICK_MS = 250;
 const NARRATION_KEEP = 16;
-const BOOTSTRAP_CHANNEL_TEMPLATES = ["international-news", "hyperliquid-readonly"] as const;
+const BOOTSTRAP_CHANNEL_TEMPLATES = [
+  "international-news",
+  "hyperliquid-readonly",
+  "polymarket-readonly",
+] as const;
 
 type AuthSession = {
   ready: boolean;
@@ -79,7 +89,12 @@ type FocusOption = {
     | "market-btc"
     | "market-eth"
     | "market-sol"
-    | "market-indicators";
+    | "market-indicators"
+    | "market-poly-24h"
+    | "market-poly-volume"
+    | "market-poly-featured"
+    | "market-poly-politics"
+    | "market-poly-crypto";
 };
 
 type ShareSnapshot = {
@@ -236,7 +251,12 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   } | null>(null);
   const [applying, setApplying] = useState(false);
   const [agentBusy, setAgentBusy] = useState(false);
+  const [polymarketActiveTitle, setPolymarketActiveTitle] = useState<string | null>(null);
   const directorBusyRef = useRef(false);
+
+  const handlePolymarketActiveMarket = useCallback((market: PolymarketMarket | null) => {
+    setPolymarketActiveTitle(market?.question ?? null);
+  }, []);
 
   const active = useMemo(
     () => channels.find((channel) => channel.id === activeId) ?? channels[0] ?? null,
@@ -379,6 +399,7 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     setPlayIndex(0);
     setSegmentStartedAt(Date.now());
     setNow(Date.now());
+    setPolymarketActiveTitle(null);
   }, [active?.id, active?.activeSpecVersion.id, itemKey]);
 
   const provider = apiKeyProviders[0] as "ANTHROPIC" | "OPENAI" | undefined;
@@ -700,6 +721,7 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
               onChooseFocus={chooseFocus}
               narration={latestNarration}
               narrationHint={narrationKeyHint}
+              onPolymarketActiveMarket={handlePolymarketActiveMarket}
             />
           ) : (
             <ShellState icon={<Tv />} title="Nothing is on yet" />
@@ -708,8 +730,10 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
       </div>
       <AvatarHost
         speechText={
-          latestNarration?.text ||
-          (currentItem ? speechTextForItem(currentItem) : null)
+          active?.spec.channelType === "polymarket"
+            ? polymarketActiveTitle
+            : latestNarration?.text ||
+              (currentItem ? speechTextForItem(currentItem) : null)
         }
       />
       <button
@@ -898,6 +922,7 @@ function BroadcastStage({
   onChooseFocus,
   narration,
   narrationHint,
+  onPolymarketActiveMarket,
 }: {
   channel: Channel;
   item: BroadcastItem | null;
@@ -908,8 +933,29 @@ function BroadcastStage({
   onChooseFocus: (option: FocusOption) => void;
   narration: ChannelNarrationMessage | null;
   narrationHint: string | null;
+  onPolymarketActiveMarket?: (market: PolymarketMarket | null) => void;
 }) {
   const showHormuzMap = hasHormuzMap(channel);
+
+  if (channel.spec.channelType === "polymarket") {
+    return (
+      <div className="boot-in flex min-h-[calc(100vh-32px)] flex-col gap-4">
+        <section className="grid flex-1 gap-4">
+          <div className="katechon-stage relative min-h-[calc(100vh-64px)] overflow-hidden rounded-[30px] border border-white/10 bg-black matrix-scanline">
+            <PolymarketBroadcast
+              channel={channel}
+              onActiveMarketChange={onPolymarketActiveMarket}
+            />
+            <FocusSwitcher
+              options={focusOptions}
+              pendingLabel={pendingFocusLabel}
+              onChoose={onChooseFocus}
+            />
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   if (channel.spec.channelType === "hyperliquid") {
     return (
@@ -1373,6 +1419,46 @@ function focusOptionsForChannel(channel: Channel): FocusOption[] {
     ];
   }
 
+  if (channel.spec.channelType === "polymarket") {
+    return [
+      {
+        label: "Top 24h",
+        hint: "Most active markets by 24-hour volume.",
+        kind: "market-poly-24h",
+        prompt:
+          "Switch the Polymarket channel to the top 24-hour volume ordering. Update dataSources[id=polymarket].constraints.mode to 'top-24h' and refresh the title.",
+      },
+      {
+        label: "All-Time",
+        hint: "Biggest markets by lifetime volume.",
+        kind: "market-poly-volume",
+        prompt:
+          "Switch the Polymarket channel to the all-time volume ordering. Update dataSources[id=polymarket].constraints.mode to 'top-volume' and refresh the title.",
+      },
+      {
+        label: "Featured",
+        hint: "Polymarket's editorially featured markets.",
+        kind: "market-poly-featured",
+        prompt:
+          "Switch the Polymarket channel to the featured markets list. Update dataSources[id=polymarket].constraints.mode to 'featured' and refresh the title.",
+      },
+      {
+        label: "Politics",
+        hint: "Politics-tagged markets only.",
+        kind: "market-poly-politics",
+        prompt:
+          "Filter the Polymarket channel to politics-tagged markets. Update dataSources[id=polymarket].constraints.mode to 'politics' and refresh the title.",
+      },
+      {
+        label: "Crypto",
+        hint: "Crypto-tagged markets only.",
+        kind: "market-poly-crypto",
+        prompt:
+          "Filter the Polymarket channel to crypto-tagged markets. Update dataSources[id=polymarket].constraints.mode to 'crypto' and refresh the title.",
+      },
+    ];
+  }
+
   if (channel.spec.channelType === "hyperliquid") {
     if (hasMarketSelected(channel) && !hasMarketIndicators(channel)) {
       return [
@@ -1414,6 +1500,24 @@ function focusOptionsForChannel(channel: Channel): FocusOption[] {
 }
 
 function buildResetPatch(channel: Channel): Partial<Channel["spec"]> {
+  if (channel.spec.channelType === "polymarket") {
+    return {
+      title: "Polymarket · Top 24h Volume",
+      dataSources: channel.spec.dataSources.map((source) =>
+        source.id === "polymarket"
+          ? {
+              ...source,
+              constraints: {
+                ...source.constraints,
+                mode: "top-24h",
+                limit: 20,
+              },
+            }
+          : source,
+      ),
+    };
+  }
+
   if (channel.spec.channelType === "hyperliquid") {
     return {
       title: "Hyperliquid Top Markets",
@@ -1533,6 +1637,27 @@ function buildFocusPatch(channel: Channel, option: FocusOption): Partial<Channel
         return source;
       }),
       playout: { ...channel.spec.playout, sourceRef: "filtered_wire", itemDurationSeconds: 10, limit: 100, strategy: "latest-first", resetOnMutation: true },
+    };
+  }
+
+  if (option.kind.startsWith("market-poly-")) {
+    const mode: PolymarketMode =
+      option.kind === "market-poly-volume"
+        ? "top-volume"
+        : option.kind === "market-poly-featured"
+          ? "featured"
+          : option.kind === "market-poly-politics"
+            ? "politics"
+            : option.kind === "market-poly-crypto"
+              ? "crypto"
+              : "top-24h";
+    return {
+      title: `Polymarket · ${polymarketModeLabel(mode)}`,
+      dataSources: channel.spec.dataSources.map((source) =>
+        source.id === "polymarket"
+          ? { ...source, constraints: { ...source.constraints, mode } }
+          : source,
+      ),
     };
   }
 
