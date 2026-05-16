@@ -1,11 +1,18 @@
 "use client";
 
 import { lazy, type LazyExoticComponent, type ComponentType } from "react";
-import type { Channel, ChannelRegion } from "@/lib/types";
+import type {
+  Channel,
+  ChannelNarrationMessage,
+  ChannelRegion,
+  ChannelScene,
+} from "@/lib/types";
 
 export interface RegionComponentProps {
   region: ChannelRegion;
   channel: Channel;
+  narration?: ChannelNarrationMessage | null;
+  scene?: ChannelScene | null;
 }
 
 // Lazy-load every region component so the initial bundle isn't bloated by

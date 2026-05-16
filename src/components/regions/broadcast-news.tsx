@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { ChevronRight, Clock, RefreshCw } from "lucide-react";
-import { latestNarrationFor } from "@/lib/channel-data";
+import { useMemo } from "react";
+import { ChevronRight, RefreshCw } from "lucide-react";
 import type {
   Channel,
   ChannelDataSourceData,
@@ -19,45 +18,13 @@ type NewsItem = {
   link: string;
 };
 
-const TICK_MS = 250;
-
-export default function BroadcastNews({ channel }: RegionComponentProps) {
+export default function BroadcastNews({ channel, narration }: RegionComponentProps) {
   const items = useMemo(() => extractItems(channel), [channel]);
-  const durationSeconds = clamp(
-    channel.spec.playout?.itemDurationSeconds ?? 10,
-    3,
-    300,
-  );
-  const [playIndex, setPlayIndex] = useState(0);
-  const [segmentStartedAt, setSegmentStartedAt] = useState(() => Date.now());
-  const [now, setNow] = useState(() => Date.now());
-  const fingerprint = useMemo(() => items.slice(0, 8).map((i) => i.id).join("|"), [items]);
-
-  useEffect(() => {
-    setPlayIndex(0);
-    setSegmentStartedAt(Date.now());
-    setNow(Date.now());
-  }, [fingerprint]);
-
-  useEffect(() => {
-    if (items.length === 0) return;
-    const id = window.setInterval(() => {
-      const nextNow = Date.now();
-      setNow(nextNow);
-      if (nextNow - segmentStartedAt >= durationSeconds * 1000) {
-        setPlayIndex((index) => (items.length > 1 ? (index + 1) % items.length : 0));
-        setSegmentStartedAt(nextNow);
-      }
-    }, TICK_MS);
-    return () => window.clearInterval(id);
-  }, [durationSeconds, items.length, segmentStartedAt]);
-
-  const item = items.length ? items[playIndex % items.length] ?? null : null;
-  const progress = Math.min(
-    1,
-    Math.max(0, (now - segmentStartedAt) / (durationSeconds * 1000)),
-  );
-  const narration = latestNarrationFor(channel.narrationMessages);
+  const chosenItemId = narration?.scene?.chosenItemId ?? narration?.metadata?.chosenItemId;
+  const item =
+    (chosenItemId ? items.find((candidate) => candidate.id === chosenItemId) : null) ??
+    items[0] ??
+    null;
 
   return (
     <div className="relative h-full w-full overflow-hidden">
@@ -70,7 +37,10 @@ export default function BroadcastNews({ channel }: RegionComponentProps) {
       </div>
       <div className="relative flex h-full min-h-[520px] flex-col p-5 pt-20 sm:p-8 sm:pt-24 lg:p-10 lg:pt-28">
         {item ? (
-          <article className="flex flex-1 flex-col justify-end lg:w-[calc(100%-420px)] xl:w-[calc(100%-520px)]">
+          <article
+            key={item.id}
+            className="scene-story-in flex flex-1 flex-col justify-end lg:w-[calc(100%-420px)] xl:w-[calc(100%-520px)]"
+          >
             <div className="mb-4 flex flex-wrap gap-2">
               <span className="border border-accent-green/30 bg-accent-green/10 px-3 py-1 text-xs uppercase tracking-[0.16em] text-accent-green">
                 Now playing
@@ -95,33 +65,12 @@ export default function BroadcastNews({ channel }: RegionComponentProps) {
                 <span className="truncate">{item.source}</span>
                 <ChevronRight size={15} />
               </a>
-              <Countdown progress={progress} seconds={durationSeconds} />
             </div>
           </article>
         ) : (
           <OffAirState channel={channel} />
         )}
-        <CaptionStrip narration={narration} />
-      </div>
-    </div>
-  );
-}
-
-function Countdown({ progress, seconds }: { progress: number; seconds: number }) {
-  const remaining = Math.max(0, Math.ceil(seconds * (1 - progress)));
-  return (
-    <div className="flex items-center gap-3">
-      <div
-        className="grid size-14 place-items-center rounded-full text-sm font-bold text-accent-green"
-        style={{
-          background: `conic-gradient(#00e87b ${progress * 360}deg, rgba(255,255,255,0.12) 0deg)`,
-        }}
-      >
-        <div className="grid size-11 place-items-center rounded-full bg-black">{remaining}</div>
-      </div>
-      <div className="text-xs uppercase tracking-[0.16em] text-white/40">
-        <Clock size={14} className="mb-1 text-accent-green" />
-        next story
+        <CaptionStrip key={narration?.id ?? "caption-empty"} narration={narration ?? null} />
       </div>
     </div>
   );
@@ -145,14 +94,16 @@ function OffAirState({ channel }: { channel: Channel }) {
 
 function CaptionStrip({ narration }: { narration: ChannelNarrationMessage | null }) {
   if (!narration) return null;
+  const title = narration.scene?.ui?.lowerThirdTitle ?? narration.scene?.title ?? "narrator";
+  const body = narration.scene?.ui?.lowerThirdBody ?? narration.scene?.speech ?? narration.text;
   return (
     <div className="pointer-events-none absolute bottom-6 left-6 right-[min(36vw,600px)] z-20 sm:bottom-8 sm:left-8">
-      <div className="pointer-events-auto rounded-2xl border border-white/10 bg-black/55 px-5 py-3 backdrop-blur">
+      <div className="scene-lower-in pointer-events-auto rounded-2xl border border-white/10 bg-black/55 px-5 py-3 backdrop-blur">
         <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-accent-green">
-          <span>narrator</span>
+          <span>{title}</span>
           <span className="text-white/35">{narration.source}</span>
         </div>
-        <p className="text-base leading-6 text-white/90">{narration.text}</p>
+        <p className="text-base leading-6 text-white/90">{body}</p>
       </div>
     </div>
   );
@@ -221,8 +172,4 @@ function formatDate(value: string | null): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }

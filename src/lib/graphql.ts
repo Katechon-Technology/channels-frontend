@@ -56,8 +56,8 @@ export const CHANNEL_FIELDS = `
     validationErrors
     createdAt
   }
-  agentJobs { id status prompt error mutationId createdAt updatedAt }
-  narrationMessages(limit: 8) { id text source createdAt metadata }
+  agentJobs { id kind provider status prompt error mutationId createdAt updatedAt }
+  narrationMessages(limit: 8) { id text source createdAt scene metadata }
   dataSourcesData {
     sourceId
     sourceType
@@ -142,6 +142,8 @@ export async function requestMutation(
       mutation RequestChannelMutation($channelId: ID!, $prompt: String!) {
         requestChannelMutation(channelId: $channelId, prompt: $prompt) {
           id
+          kind
+          provider
           status
           prompt
           error
@@ -308,7 +310,7 @@ export function subscribeChannelNarration(
   return subscribe<ChannelNarrationPayload>(
     `
       subscription ChannelNarration($channelId: ID!) {
-        channelNarration(channelId: $channelId) { id text source createdAt metadata }
+        channelNarration(channelId: $channelId) { id text source createdAt scene metadata }
       }
     `,
     { channelId },
@@ -330,7 +332,7 @@ export function subscribeChannelAgentJobUpdated(
     `
       subscription ChannelAgentJob($channelId: ID!) {
         channelAgentJobUpdated(channelId: $channelId) {
-          id status prompt error mutationId createdAt updatedAt
+          id kind provider status prompt error mutationId createdAt updatedAt
         }
       }
     `,
@@ -367,6 +369,18 @@ export async function narrateChannel(
       }
     `,
     { channelId, provider, items, recentlyShown },
+    token,
+  );
+}
+
+export async function flushChannelNarration(channelId: string, token?: string | null) {
+  return graphql<{ flushChannelNarration: boolean }>(
+    `
+      mutation FlushChannelNarration($channelId: ID!) {
+        flushChannelNarration(channelId: $channelId)
+      }
+    `,
+    { channelId },
     token,
   );
 }

@@ -20,12 +20,13 @@ const MODE_CLASS: Record<string, string> = {
 
 type ActivePopup = {
   id: string;
+  title?: string;
   text: string;
   source: string;
   shownAt: number;
 };
 
-export default function PopupHost({ region, channel }: RegionComponentProps) {
+export default function PopupHost({ region, narration }: RegionComponentProps) {
   const mode = String(region.props.mode ?? "toast");
   const position = String(region.props.position ?? "bottom-right");
   const durationMs = Math.max(0, Math.round(Number(region.props.durationMs) || 5000));
@@ -39,17 +40,18 @@ export default function PopupHost({ region, channel }: RegionComponentProps) {
   // Watch for new narration messages
   useEffect(() => {
     if (triggerOn === "agent-event") return; // skip narration trigger entirely
-    const latest = pickLatest(channel.narrationMessages, matcher);
+    const latest = narration && matchesNarration(narration, matcher) ? narration : null;
     if (!latest) return;
     if (dismissed.has(latest.id)) return;
     if (active?.id === latest.id) return;
     setActive({
       id: latest.id,
-      text: latest.text,
+      text: latest.scene?.ui?.overlayBody ?? latest.scene?.speech ?? latest.text,
       source: latest.source,
       shownAt: Date.now(),
+      ...(latest.scene?.ui?.overlayTitle ? { title: latest.scene.ui.overlayTitle } : {}),
     });
-  }, [channel.narrationMessages, matcher, triggerOn, dismissed, active?.id]);
+  }, [narration, matcher, triggerOn, dismissed, active?.id]);
 
   // Auto-dismiss after durationMs (0 = manual)
   useEffect(() => {
@@ -72,7 +74,7 @@ export default function PopupHost({ region, channel }: RegionComponentProps) {
       >
         <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-white/55">
           <span className="h-2 w-2 animate-pulse rounded-full bg-accent-green" />
-          <span>{active.source}</span>
+          <span>{active.title ?? active.source}</span>
         </div>
         <p className="text-sm leading-6">{active.text}</p>
         {durationMs <= 0 ? (
@@ -110,14 +112,10 @@ function buildMatcher(pattern: string): ((text: string) => boolean) | null {
   return (text) => text.toLowerCase().includes(lower);
 }
 
-function pickLatest(
-  messages: ChannelNarrationMessage[] | null | undefined,
+function matchesNarration(
+  message: ChannelNarrationMessage,
   matcher: ((text: string) => boolean) | null,
-): ChannelNarrationMessage | null {
-  if (!messages?.length) return null;
-  const sorted = [...messages].sort(
-    (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt),
-  );
-  if (!matcher) return sorted[0] ?? null;
-  return sorted.find((m) => matcher(m.text)) ?? null;
+): boolean {
+  if (!matcher) return true;
+  return matcher(message.text) || matcher(message.scene?.speech ?? "");
 }

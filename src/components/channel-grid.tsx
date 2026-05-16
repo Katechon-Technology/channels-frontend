@@ -1,7 +1,12 @@
 "use client";
 
 import { createElement, Suspense } from "react";
-import type { Channel, ChannelRegion } from "@/lib/types";
+import type {
+  Channel,
+  ChannelNarrationMessage,
+  ChannelRegion,
+  ChannelScene,
+} from "@/lib/types";
 import {
   getGridPreset,
   type GridPreset,
@@ -12,9 +17,11 @@ import { resolveRegionComponent } from "./component-registry";
 
 interface ChannelGridProps {
   channel: Channel;
+  narration?: ChannelNarrationMessage | null;
+  scene?: ChannelScene | null;
 }
 
-export function ChannelGrid({ channel }: ChannelGridProps) {
+export function ChannelGrid({ channel, narration, scene }: ChannelGridProps) {
   const ui = channel.spec.ui;
   const preset = getGridPreset(ui.gridTemplate);
   if (!preset) {
@@ -30,9 +37,61 @@ export function ChannelGrid({ channel }: ChannelGridProps) {
 
   return (
     <div className="relative h-full w-full overflow-hidden">
-      {bg ? <LayerBg region={bg} channel={channel} /> : null}
-      <GridSurface preset={preset} regions={ui.regions} channel={channel} gap={ui.gap} />
-      {fg ? <LayerFg region={fg} channel={channel} /> : null}
+      {bg ? <LayerBg region={bg} channel={channel} narration={narration} scene={scene} /> : null}
+      <GridSurface
+        preset={preset}
+        regions={ui.regions}
+        channel={channel}
+        narration={narration}
+        scene={scene}
+        gap={ui.gap}
+      />
+      {fg ? <LayerFg region={fg} channel={channel} narration={narration} scene={scene} /> : null}
+      <SceneOverlay scene={scene} sceneKey={narration?.id ?? null} />
+    </div>
+  );
+}
+
+function SceneOverlay({
+  scene,
+  sceneKey,
+}: {
+  scene?: ChannelScene | null;
+  sceneKey?: string | null;
+}) {
+  const lowerTitle = scene?.ui?.lowerThirdTitle ?? scene?.title;
+  const lowerBody = scene?.ui?.lowerThirdBody;
+  const overlayTitle = scene?.ui?.overlayTitle;
+  const overlayBody = scene?.ui?.overlayBody;
+  if (!lowerTitle && !lowerBody && !overlayTitle && !overlayBody) return null;
+  return (
+    <div className="pointer-events-none absolute inset-0 z-[60]">
+      {overlayTitle || overlayBody ? (
+        <div
+          key={`overlay-${sceneKey ?? overlayTitle ?? overlayBody}`}
+          className="scene-overlay-in absolute right-6 top-6 max-w-md rounded-2xl border border-accent-green/25 bg-black/70 p-4 text-white shadow-2xl backdrop-blur"
+        >
+          {overlayTitle ? (
+            <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-accent-green">
+              {overlayTitle}
+            </div>
+          ) : null}
+          {overlayBody ? <p className="text-sm leading-6 text-white/85">{overlayBody}</p> : null}
+        </div>
+      ) : null}
+      {lowerTitle || lowerBody ? (
+        <div
+          key={`lower-${sceneKey ?? lowerTitle ?? lowerBody}`}
+          className="scene-lower-in absolute bottom-6 left-6 right-[min(36vw,600px)] rounded-2xl border border-white/10 bg-black/65 px-5 py-3 text-white shadow-2xl backdrop-blur"
+        >
+          {lowerTitle ? (
+            <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-accent-green">
+              {lowerTitle}
+            </div>
+          ) : null}
+          {lowerBody ? <p className="line-clamp-3 text-base leading-6 text-white/90">{lowerBody}</p> : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -41,11 +100,15 @@ function GridSurface({
   preset,
   regions,
   channel,
+  narration,
+  scene,
   gap,
 }: {
   preset: GridPreset;
   regions: Record<string, ChannelRegion>;
   channel: Channel;
+  narration?: ChannelNarrationMessage | null;
+  scene?: ChannelScene | null;
   gap?: string;
 }) {
   const gridStyle: React.CSSProperties = {
@@ -73,6 +136,8 @@ function GridSurface({
               area={area}
               region={region}
               channel={channel}
+              narration={narration}
+              scene={scene}
             />
           );
         })}
@@ -84,10 +149,14 @@ function RegionSlot({
   area,
   region,
   channel,
+  narration,
+  scene,
 }: {
   area: GridPresetArea;
   region: ChannelRegion;
   channel: Channel;
+  narration?: ChannelNarrationMessage | null;
+  scene?: ChannelScene | null;
 }) {
   const resolved = resolveRegionComponent(region.component);
   const containerStyle: React.CSSProperties = {
@@ -106,28 +175,48 @@ function RegionSlot({
   return (
     <div style={containerStyle}>
       <Suspense fallback={<RegionFallback />}>
-        {createElement(resolved, { region, channel })}
+        {createElement(resolved, { region, channel, narration, scene })}
       </Suspense>
     </div>
   );
 }
 
-function LayerBg({ region, channel }: { region: ChannelRegion; channel: Channel }) {
+function LayerBg({
+  region,
+  channel,
+  narration,
+  scene,
+}: {
+  region: ChannelRegion;
+  channel: Channel;
+  narration?: ChannelNarrationMessage | null;
+  scene?: ChannelScene | null;
+}) {
   const resolved = resolveRegionComponent(region.component);
   if (!resolved) return null;
   return (
     <div className="pointer-events-none absolute inset-0 z-0">
-      <Suspense fallback={null}>{createElement(resolved, { region, channel })}</Suspense>
+      <Suspense fallback={null}>{createElement(resolved, { region, channel, narration, scene })}</Suspense>
     </div>
   );
 }
 
-function LayerFg({ region, channel }: { region: ChannelRegion; channel: Channel }) {
+function LayerFg({
+  region,
+  channel,
+  narration,
+  scene,
+}: {
+  region: ChannelRegion;
+  channel: Channel;
+  narration?: ChannelNarrationMessage | null;
+  scene?: ChannelScene | null;
+}) {
   const resolved = resolveRegionComponent(region.component);
   if (!resolved) return null;
   return (
     <div className="pointer-events-none absolute inset-0 z-50">
-      <Suspense fallback={null}>{createElement(resolved, { region, channel })}</Suspense>
+      <Suspense fallback={null}>{createElement(resolved, { region, channel, narration, scene })}</Suspense>
     </div>
   );
 }

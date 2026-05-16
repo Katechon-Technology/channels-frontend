@@ -68,6 +68,10 @@ let currentSource = null, currentMouth = 0, playbackSeq = 0;
 let syntheticSpeaking = false, syntheticMouthPhase = 0;
 const RMS_GAIN = 1.5;
 
+function postSpeechEvent(type, id, details) {
+  try { window.parent.postMessage({ type, id: id || null, ...(details || {}) }, '*'); } catch (e) {}
+}
+
 function getRms() {
   if (syntheticSpeaking && !currentSource) {
     syntheticMouthPhase += 0.34;
@@ -102,16 +106,30 @@ function stopAudio() {
   currentMouth = 0;
 }
 
-function speakText(text) {
-  if (!window.speechSynthesis || !text) return;
+function speakText(text, id) {
+  if (!window.speechSynthesis || !text) {
+    postSpeechEvent('speech-ended', id, { natural: false, reason: 'unavailable' });
+    return;
+  }
   stopAudio();
   const utterance = new SpeechSynthesisUtterance(String(text));
   utterance.rate = 0.96;
   utterance.pitch = 1.08;
   utterance.volume = 0.95;
-  utterance.onstart = () => { syntheticSpeaking = true; };
-  utterance.onend = () => { syntheticSpeaking = false; currentMouth = 0; };
-  utterance.onerror = () => { syntheticSpeaking = false; currentMouth = 0; };
+  utterance.onstart = () => {
+    syntheticSpeaking = true;
+    postSpeechEvent('speech-started', id, { natural: true });
+  };
+  utterance.onend = () => {
+    syntheticSpeaking = false;
+    currentMouth = 0;
+    postSpeechEvent('speech-ended', id, { natural: true });
+  };
+  utterance.onerror = () => {
+    syntheticSpeaking = false;
+    currentMouth = 0;
+    postSpeechEvent('speech-ended', id, { natural: false, reason: 'error' });
+  };
   window.speechSynthesis.speak(utterance);
 }
 
@@ -134,20 +152,23 @@ async function playPayload(payload) {
     const offsetSeconds = Math.min(Math.max(0, requestedOffsetMs / 1000), Math.max(0, audioBuffer.duration - 0.25));
     source.start(0, offsetSeconds);
     currentSource = source;
-    try { window.parent.postMessage({ type: 'audio-started', id, durationMs: Math.round(audioBuffer.duration * 1000), offsetMs: Math.round(offsetSeconds * 1000) }, '*'); } catch (e) {}
+    postSpeechEvent('audio-started', id, { durationMs: Math.round(audioBuffer.duration * 1000), offsetMs: Math.round(offsetSeconds * 1000) });
     source.onended = () => {
       const naturalEnd = currentSource === source;
       if (naturalEnd) currentSource = null;
-      try { window.parent.postMessage({ type: 'audio-ended', id, natural: naturalEnd }, '*'); } catch (e) {}
+      postSpeechEvent('audio-ended', id, { natural: naturalEnd });
     };
-  } catch (err) { console.error('[avatar] audio decode error:', err); }
+  } catch (err) {
+    console.error('[avatar] audio decode error:', err);
+    postSpeechEvent('audio-ended', id, { natural: false, reason: 'decode-error' });
+  }
 }
 
 window.addEventListener('message', (e) => {
   if (!e.data) return;
   if (e.data.type === 'unlock') ensureAudioCtx();
   if (e.data.type === 'audio') playPayload(e.data);
-  if (e.data.type === 'speak-text') speakText(e.data.text);
+  if (e.data.type === 'speak-text') speakText(e.data.text, e.data.id || null);
   if (e.data.type === 'stop') stopAudio();
   if (e.data.type === 'switch-model') switchModel(e.data.index ?? 0);
   if (e.data.type === 'tune') applyTransform(e.data.scale, e.data.yFactor);

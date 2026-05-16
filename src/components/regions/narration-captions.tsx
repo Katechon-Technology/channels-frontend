@@ -1,13 +1,13 @@
 "use client";
 
 import { Captions } from "lucide-react";
-import { latestNarrationFor } from "@/lib/channel-data";
 import type { RegionComponentProps } from "../component-registry";
 import { Panel, formatTimeAgo, readNumber } from "./_panel";
 
-export default function NarrationCaptions({ region, channel }: RegionComponentProps) {
+export default function NarrationCaptions({ region, narration }: RegionComponentProps) {
   const maxLines = Math.max(1, Math.min(20, Math.round(readNumber(region.props.maxLines, 4))));
-  const latest = latestNarrationFor(channel.narrationMessages);
+  const latest = narration ?? null;
+  const speech = latest?.scene?.speech ?? latest?.text;
   const title = typeof region.props.title === "string" ? region.props.title : undefined;
   return (
     <Panel title={title} icon={title ? <Captions size={15} /> : undefined}>
@@ -26,7 +26,7 @@ export default function NarrationCaptions({ region, channel }: RegionComponentPr
               overflow: "hidden",
             }}
           >
-            {latest.text}
+            {speech}
           </p>
         </div>
       ) : (

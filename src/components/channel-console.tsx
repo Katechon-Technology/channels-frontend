@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import {
   Bot,
+  Eraser,
   Loader2,
   Radio,
   RotateCcw,
@@ -15,6 +16,7 @@ import {
   applyMutation,
   createChannel,
   fetchApiKeyProviders,
+  flushChannelNarration,
   loadChannels,
   narrateChannel,
   previewChannelPatch,
@@ -33,13 +35,14 @@ import {
   isAutoApplyOption,
   type FocusOption,
 } from "@/lib/focus-presets";
-import { AvatarHost } from "@/components/avatar-host";
+import { AvatarHost, type AvatarSpeechEvent } from "@/components/avatar-host";
 import { ChannelGrid } from "@/components/channel-grid";
 import { SettingsDrawer } from "@/components/settings-drawer";
 import type {
   Channel,
   ChannelAgentJob,
   ChannelDataSourceData,
+  ChannelMutation,
   ChannelNarrationMessage,
   ChannelSuggestedAction,
 } from "@/lib/types";
@@ -222,7 +225,14 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   } | null>(null);
   const [applying, setApplying] = useState(false);
   const [agentBusy, setAgentBusy] = useState(false);
+  const [flushingNarration, setFlushingNarration] = useState(false);
+  const [activeNarrationId, setActiveNarrationId] = useState<string | null>(null);
   const directorBusyRef = useRef(false);
+  const narrationRequestPendingRef = useRef(false);
+  const narrationChannelRef = useRef<string | null>(null);
+  const playedNarrationIdsRef = useRef<Set<string>>(new Set());
+  const requestedAfterSpeechRef = useRef<string | null>(null);
+  const lastStagedNarrationIdRef = useRef<string | null>(null);
 
   const active = useMemo(
     () => channels.find((channel) => channel.id === activeId) ?? channels[0] ?? null,
@@ -233,6 +243,24 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   const items = useMemo(() => (active ? extractBroadcastItems(active) : []), [active]);
   const itemKey = useMemo(() => itemsFingerprint(items), [items]);
   const currentItem = items.length ? items[playIndex % items.length] : null;
+  const activeChannelId = active?.id ?? null;
+  const activeNarrationMessages = active?.narrationMessages;
+  const orderedNarrations = useMemo(
+    () => orderNarrationMessages(activeNarrationMessages),
+    [activeNarrationMessages],
+  );
+  const latestKnownNarration = useMemo(
+    () => latestNarrationFor(activeNarrationMessages),
+    [activeNarrationMessages],
+  );
+  const latestNarration = useMemo(
+    () =>
+      activeNarrationId
+        ? activeNarrationMessages?.find((message) => message.id === activeNarrationId) ?? null
+        : null,
+    [activeNarrationId, activeNarrationMessages],
+  );
+  const latestScene = latestNarration?.scene ?? null;
 
   const refresh = useCallback(
     async (options: { autoTune?: boolean; quiet?: boolean } = {}) => {
@@ -294,23 +322,23 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   }, [auth.ready, auth.authenticated, refresh]);
 
   useEffect(() => {
-    if (!auth.ready || !auth.authenticated || !active) return;
+    if (!auth.ready || !auth.authenticated || !activeChannelId) return;
     const id = window.setInterval(() => {
       void refresh({ quiet: true });
     }, POLL_MS);
     return () => window.clearInterval(id);
-  }, [active, auth.authenticated, auth.ready, refresh]);
+  }, [activeChannelId, auth.authenticated, auth.ready, refresh]);
 
   // Live updates over GraphQL SSE — replaces 30s polling for the active channel.
   useEffect(() => {
-    if (!auth.ready || !auth.authenticated || !active) return;
+    if (!auth.ready || !auth.authenticated || !activeChannelId) return;
     let cancelled = false;
     const handles: Array<{ close(): void }> = [];
 
     const setUp = async () => {
       const token = await auth.getToken();
       if (cancelled) return;
-      const channelId = active.id;
+      const channelId = activeChannelId;
 
       handles.push(
         subscribeChannelUpdated(channelId, token, (updated) => {
@@ -344,7 +372,32 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
                 : channel,
             ),
           );
-          setAgentBusy(job.status === "queued" || job.status === "running");
+          setAgentBusy(
+            job.kind !== "narration" && (job.status === "queued" || job.status === "running"),
+          );
+          if (job.kind === "narration" && job.status === "failed") {
+            narrationRequestPendingRef.current = false;
+          }
+          if (job.kind !== "narration" && job.status === "previewed" && job.mutationId) {
+            void (async () => {
+              try {
+                const data = await loadChannels(token);
+                if (cancelled) return;
+                setChannels(data.channels);
+                const nextChannel = data.channels.find((channel) => channel.id === channelId);
+                const mutation = nextChannel?.mutations.find((m) => m.id === job.mutationId);
+                if (nextChannel && mutation) {
+                  setPendingPreview({
+                    channelId,
+                    label: job.prompt || "Agent update",
+                    preview: previewFromMutation(nextChannel, mutation),
+                  });
+                }
+              } catch {
+                // Polling will catch up; leave the user in the current scene.
+              }
+            })();
+          }
         }),
       );
     };
@@ -355,7 +408,7 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
       cancelled = true;
       for (const h of handles) h.close();
     };
-  }, [active?.id, auth, auth.authenticated, auth.ready]);
+  }, [activeChannelId, auth, auth.authenticated, auth.ready]);
 
   useEffect(() => {
     setPlayIndex(0);
@@ -366,18 +419,19 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   const agentDriven = !!provider;
 
   const recentlyShownIds = useMemo<string[]>(() => {
-    if (!active) return [];
-    return (active.narrationMessages ?? [])
-      .map((m) => m.metadata?.chosenItemId)
+    return (activeNarrationMessages ?? [])
+      .map((m) => m.scene?.chosenItemId ?? m.metadata?.chosenItemId)
       .filter((id): id is string => !!id)
       .slice(0, 8);
-  }, [active?.narrationMessages]);
+  }, [activeNarrationMessages]);
 
   const fireDirector = useCallback(
     async (recent: string[]) => {
-      if (!active || !provider || items.length === 0) return;
+      if (!activeChannelId || !provider || items.length === 0) return;
       if (directorBusyRef.current) return;
+      if (narrationRequestPendingRef.current) return;
       directorBusyRef.current = true;
+      narrationRequestPendingRef.current = true;
       try {
         const payload = items.map((it) => ({
           id: it.id,
@@ -387,15 +441,16 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
           sourceLabel: it.source || null,
         }));
         const token = await auth.getToken();
-        await narrateChannel(active.id, provider, payload, recent, token);
+        await narrateChannel(activeChannelId, provider, payload, recent, token);
       } catch {
+        narrationRequestPendingRef.current = false;
         // The narrator failures surface separately via the agent-job log; the
         // missing-API-key prompt lives in the Settings drawer indicator.
       } finally {
         directorBusyRef.current = false;
       }
     },
-    [active?.id, provider, items, auth],
+    [activeChannelId, provider, items, auth],
   );
 
   // Load configured api-key providers once on auth-ready; refresh after slice-D mutations.
@@ -416,25 +471,60 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     };
   }, [auth, auth.authenticated, auth.ready]);
 
-  const latestNarration = useMemo(
-    () => (active ? latestNarrationFor(active.narrationMessages) : null),
-    [active?.narrationMessages],
-  );
-
-  // Agent-driven scene controller: jump to the chosenItemId on every new
-  // narration message, then schedule the next director call once the current
-  // narration has likely played out. Falls back to the simple auto-cycler
-  // below when no API key is configured.
+  // Stage one narration at a time. Incoming feed events queue in channel state
+  // and only become visible after the current speech ends.
   useEffect(() => {
-    if (!agentDriven || !active || items.length === 0) return;
-
-    if (!latestNarration) {
-      // No narration yet — kick off the first scene.
-      void fireDirector([]);
+    if (!activeChannelId) {
+      narrationChannelRef.current = null;
+      playedNarrationIdsRef.current = new Set();
+      setActiveNarrationId(null);
       return;
     }
 
-    const chosenId = latestNarration.metadata?.chosenItemId;
+    if (narrationChannelRef.current !== activeChannelId) {
+      narrationChannelRef.current = activeChannelId;
+      directorBusyRef.current = false;
+      narrationRequestPendingRef.current = false;
+      requestedAfterSpeechRef.current = null;
+      lastStagedNarrationIdRef.current = null;
+
+      const latestId = latestKnownNarration?.id ?? null;
+      playedNarrationIdsRef.current = new Set(
+        orderedNarrations
+          .map((message) => message.id)
+          .filter((id) => id !== latestId),
+      );
+      setActiveNarrationId(latestId);
+      return;
+    }
+
+    if (activeNarrationId && orderedNarrations.some((message) => message.id === activeNarrationId)) {
+      return;
+    }
+
+    const next = nextQueuedNarration(orderedNarrations, playedNarrationIdsRef.current);
+    if (next) setActiveNarrationId(next.id);
+  }, [activeChannelId, activeNarrationId, latestKnownNarration?.id, orderedNarrations]);
+
+  useEffect(() => {
+    const stagedId = latestNarration?.id ?? null;
+    if (!activeChannelId || !stagedId || stagedId === lastStagedNarrationIdRef.current) return;
+    lastStagedNarrationIdRef.current = stagedId;
+    narrationRequestPendingRef.current = false;
+    requestedAfterSpeechRef.current = null;
+  }, [activeChannelId, latestNarration?.id]);
+
+  // Scene controller: jump to the chosenItemId for the staged narration only.
+  // The next narration request is driven by the avatar's actual speech-ended event.
+  useEffect(() => {
+    if (!activeChannelId || items.length === 0) return;
+
+    if (!latestNarration) {
+      if (agentDriven && orderedNarrations.length === 0) void fireDirector([]);
+      return;
+    }
+
+    const chosenId = latestScene?.chosenItemId ?? latestNarration.metadata?.chosenItemId;
     if (chosenId) {
       const idx = items.findIndex((it) => it.id === chosenId);
       if (idx >= 0 && idx !== playIndex) {
@@ -442,27 +532,47 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
         setSegmentStartedAt(Date.now());
       }
     }
+  }, [
+    activeChannelId,
+    agentDriven,
+    fireDirector,
+    items,
+    latestNarration,
+    latestScene,
+    orderedNarrations.length,
+    playIndex,
+  ]);
 
-    // Roughly model "narration is done speaking" via text length: ~55ms/char,
-    // clamped to [8s, 30s]. If the message is already older than that, advance
-    // very soon.
-    const speakMs = Math.min(30_000, Math.max(8_000, latestNarration.text.length * 55));
-    const elapsedMs = Date.now() - Date.parse(latestNarration.createdAt);
-    const remainingMs = Math.max(800, speakMs - elapsedMs);
+  const handleAvatarSpeechEnd = useCallback(
+    (event: AvatarSpeechEvent) => {
+      if (!latestNarration || event.speechKey !== latestNarration.id) return;
+      if (isInterruptedSpeechEnd(event)) return;
+      if (requestedAfterSpeechRef.current === event.speechKey) return;
 
-    const timer = window.setTimeout(() => {
+      requestedAfterSpeechRef.current = event.speechKey;
+      playedNarrationIdsRef.current.add(latestNarration.id);
+
+      const next = nextQueuedNarration(orderedNarrations, playedNarrationIdsRef.current);
+      if (next) {
+        setActiveNarrationId(next.id);
+        return;
+      }
+
+      setActiveNarrationId(null);
+      if (!agentDriven) return;
+
+      const chosenId = latestScene?.chosenItemId ?? latestNarration.metadata?.chosenItemId;
       const recentForNext = chosenId
         ? [chosenId, ...recentlyShownIds.filter((id) => id !== chosenId)].slice(0, 8)
         : recentlyShownIds;
       void fireDirector(recentForNext);
-    }, remainingMs);
-    return () => window.clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active?.id, items, latestNarration?.id, agentDriven, fireDirector]);
+    },
+    [agentDriven, fireDirector, latestNarration, latestScene, orderedNarrations, recentlyShownIds],
+  );
 
-  // Auto-cycler — only runs as a fallback when the agent isn't driving.
+  // Auto-cycler — only runs as a fallback for non-news channels when the agent isn't driving.
   useEffect(() => {
-    if (agentDriven || items.length === 0) return;
+    if (agentDriven || active?.spec.channelType === "news" || items.length === 0) return;
     const id = window.setInterval(() => {
       const nextNow = Date.now();
       if (nextNow - segmentStartedAt >= durationSeconds * 1000) {
@@ -471,7 +581,15 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
       }
     }, TICK_MS);
     return () => window.clearInterval(id);
-  }, [agentDriven, durationSeconds, items.length, segmentStartedAt]);
+  }, [active?.spec.channelType, agentDriven, durationSeconds, items.length, segmentStartedAt]);
+
+  const avatarSpeechText =
+    latestScene?.speech ||
+    latestNarration?.text ||
+    (!agentDriven && currentItem ? speechTextForItem(currentItem) : null);
+  const avatarSpeechKey =
+    latestNarration?.id ??
+    (!agentDriven && currentItem ? `item:${activeChannelId ?? "local"}:${currentItem.id}` : null);
 
   async function choosePreset(option: FocusOption) {
     if (!active || pendingFocus || pendingPreview) return;
@@ -598,6 +716,7 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
       const token = await auth.getToken();
       const updated: Channel[] = [];
       for (const channel of channels) {
+        await flushChannelNarration(channel.id, token);
         const preview = await previewChannelPatch(
           channel.id,
           buildResetPatch(channel),
@@ -617,6 +736,42 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
       // leave channels as-is
     } finally {
       setPendingFocus(null);
+    }
+  }
+
+  async function flushActiveNarration() {
+    if (!active || flushingNarration) return;
+    setFlushingNarration(true);
+    try {
+      const token = await auth.getToken();
+      directorBusyRef.current = false;
+      narrationRequestPendingRef.current = false;
+      requestedAfterSpeechRef.current = null;
+      lastStagedNarrationIdRef.current = null;
+      playedNarrationIdsRef.current = new Set();
+      setActiveNarrationId(null);
+      await flushChannelNarration(active.id, token);
+      setChannels((current) =>
+        current.map((channel) =>
+          channel.id === active.id
+            ? {
+                ...channel,
+                narrationMessages: [],
+                agentJobs: channel.agentJobs.map((job) =>
+                  job.kind === "narration" &&
+                  (job.status === "queued" || job.status === "running")
+                    ? { ...job, status: "cancelled", error: "Narration queue flushed." }
+                    : job,
+                ),
+              }
+            : channel,
+        ),
+      );
+      await refresh({ quiet: true });
+    } catch {
+      // Keep the broadcast running; the next poll will restore server state.
+    } finally {
+      setFlushingNarration(false);
     }
   }
 
@@ -690,6 +845,8 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
               channel={active}
               presetOptions={focusOptionsForChannel(active)}
               suggestedActions={active.suggestedActions ?? []}
+              narration={latestNarration}
+              scene={latestScene}
               pendingFocusLabel={pendingFocus?.channelId === active.id ? pendingFocus.label : null}
               onChoosePreset={choosePreset}
               onChooseSuggested={chooseSuggestedAction}
@@ -700,11 +857,20 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
         </section>
       </div>
       <AvatarHost
-        speechText={
-          latestNarration?.text ||
-          (currentItem ? speechTextForItem(currentItem) : null)
-        }
+        speechText={avatarSpeechText}
+        speechKey={avatarSpeechKey}
+        onSpeechEnd={handleAvatarSpeechEnd}
       />
+      <button
+        type="button"
+        onClick={flushActiveNarration}
+        aria-label="Flush narration queue"
+        title="Flush narration queue"
+        className="fixed right-52 top-4 z-40 inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-white/70 shadow-lg backdrop-blur hover:bg-white/10 hover:text-white disabled:opacity-40"
+        disabled={!active || flushingNarration || Boolean(pendingFocus) || Boolean(pendingPreview)}
+      >
+        {flushingNarration ? <Loader2 size={15} className="animate-spin" /> : <Eraser size={15} />}
+      </button>
       <button
         type="button"
         onClick={resetAllChannels}
@@ -976,10 +1142,26 @@ function previewValue(value: unknown): string {
   }
 }
 
+function previewFromMutation(
+  channel: Channel,
+  mutation: ChannelMutation,
+): ChannelMutationPreview {
+  return {
+    mutation: { id: mutation.id },
+    canApply: mutation.status === "previewed" && mutation.validationErrors.length === 0,
+    validationErrors: mutation.validationErrors,
+    currentSpec: channel.spec,
+    proposedSpec: mutation.proposedSpec,
+    diff: mutation.diff,
+  };
+}
+
 function BroadcastStage({
   channel,
   presetOptions,
   suggestedActions,
+  narration,
+  scene,
   pendingFocusLabel,
   onChoosePreset,
   onChooseSuggested,
@@ -987,6 +1169,8 @@ function BroadcastStage({
   channel: Channel;
   presetOptions: FocusOption[];
   suggestedActions: ChannelSuggestedAction[];
+  narration?: ChannelNarrationMessage | null;
+  scene?: ChannelNarrationMessage["scene"] | null;
   pendingFocusLabel: string | null;
   onChoosePreset: (option: FocusOption) => void;
   onChooseSuggested: (option: ChannelSuggestedAction) => void;
@@ -995,7 +1179,7 @@ function BroadcastStage({
     <div className="boot-in flex min-h-[calc(100vh-32px)] flex-col gap-4">
       <section className="grid flex-1 gap-4">
         <div className="katechon-stage relative min-h-[calc(100vh-64px)] overflow-hidden rounded-[30px] border border-white/10 bg-black matrix-scanline">
-          <ChannelGrid channel={channel} />
+          <ChannelGrid channel={channel} narration={narration} scene={scene} />
           <FocusSwitcher
             presets={presetOptions}
             suggested={suggestedActions}
@@ -1330,6 +1514,26 @@ function mergeNarration(
 ): ChannelNarrationMessage[] {
   if (existing.some((m) => m.id === incoming.id)) return existing;
   return [incoming, ...existing].slice(0, NARRATION_KEEP);
+}
+
+function orderNarrationMessages(
+  messages: ChannelNarrationMessage[] | null | undefined,
+): ChannelNarrationMessage[] {
+  if (!messages?.length) return [];
+  return [...messages].sort(
+    (a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt),
+  );
+}
+
+function nextQueuedNarration(
+  messages: ChannelNarrationMessage[],
+  playedIds: Set<string>,
+): ChannelNarrationMessage | null {
+  return messages.find((message) => !playedIds.has(message.id)) ?? null;
+}
+
+function isInterruptedSpeechEnd(event: AvatarSpeechEvent): boolean {
+  return event.natural === false && !["decode-error", "error", "unavailable"].includes(event.reason ?? "");
 }
 
 function mergeAgentJob(

@@ -65,6 +65,23 @@ export type ChannelSuggestedAction = {
   prompt: string;
 };
 
+export type ChannelScene = {
+  title?: string;
+  speech: string;
+  chosenItemId?: string;
+  sourceRef?: string;
+  ui?: {
+    lowerThirdTitle?: string;
+    lowerThirdBody?: string;
+    highlightRegion?: string;
+    overlayTitle?: string;
+    overlayBody?: string;
+  };
+  tts?: {
+    voice?: string;
+  };
+};
+
 export type ChannelTemplate = {
   slug: string;
   name: string;
@@ -87,6 +104,8 @@ export type ChannelMutation = {
 
 export type ChannelAgentJob = {
   id: string;
+  kind?: string | null;
+  provider?: "ANTHROPIC" | "OPENAI" | null;
   status: string;
   prompt: string;
   error?: string | null;
@@ -100,6 +119,7 @@ export type ChannelNarrationMessage = {
   text: string;
   source: string;
   createdAt: string;
+  scene?: ChannelScene | null;
   metadata?: { chosenItemId?: string; jobId?: string; provider?: string; itemCount?: number } | null;
 };
 
