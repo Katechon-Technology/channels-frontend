@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createChart,
   LineSeries,
@@ -8,7 +8,7 @@ import {
   type LineData,
   type UTCTimestamp,
 } from "lightweight-charts";
-import type { Channel } from "@/lib/types";
+import type { Channel, ChannelNarrationMessage } from "@/lib/types";
 
 export type PolymarketMode =
   | "top-24h"
@@ -26,6 +26,7 @@ export interface PolymarketMarket {
   noPrice: number | null;
   yesTokenId: string | null;
   volume24hr: number | null;
+  url?: string | null;
 }
 
 interface PriceHistoryPoint {
@@ -46,28 +47,60 @@ const MODE_LABELS: Record<PolymarketMode, string> = {
 
 export function PolymarketBroadcast({
   channel,
+  narration,
+  narrationDriven = false,
   onActiveMarketChange,
 }: {
   channel: Channel;
+  narration?: ChannelNarrationMessage | null;
+  narrationDriven?: boolean;
   onActiveMarketChange?: (market: PolymarketMarket | null) => void;
 }) {
   const { mode, limit, durationSeconds } = readPolymarketConfig(channel);
-  const { markets, status } = useMarkets(mode, limit);
+  const channelMarkets = useMemo(() => readChannelPolymarketMarkets(channel), [channel]);
+  const remote = useMarkets(mode, limit);
+  const markets = channelMarkets.length ? channelMarkets : remote.markets;
+  const status = channelMarkets.length ? "ready" : remote.status;
+  const fingerprint = markets.map((market) => market.id).join("|");
   const [activeIndex, setActiveIndex] = useState(0);
+  const chosenMarketId = narration?.scene?.chosenItemId ?? narration?.metadata?.chosenItemId;
+  const controlledByNarration = narrationDriven || Boolean(narration);
 
   useEffect(() => {
     setActiveIndex(0);
-  }, [mode, markets.length]);
+  }, [mode, fingerprint]);
 
   useEffect(() => {
-    if (markets.length <= 1) return;
+    if (controlledByNarration || markets.length <= 1) return;
     const id = window.setInterval(() => {
       setActiveIndex((i) => (i + 1) % markets.length);
     }, durationSeconds * 1000);
     return () => window.clearInterval(id);
-  }, [markets.length, durationSeconds]);
+  }, [controlledByNarration, markets.length, durationSeconds]);
 
-  const active = markets.length ? markets[activeIndex % markets.length]! : null;
+  const narrationMarket = chosenMarketId
+    ? markets.find((market) => marketMatchesNarrationId(market, chosenMarketId)) ?? null
+    : null;
+  const active = narrationMarket ?? (markets.length ? markets[activeIndex % markets.length]! : null);
+
+  useEffect(() => {
+    window.dispatchEvent(
+      new CustomEvent("katechon:polymarket-markets", {
+        detail: {
+          channelId: channel.id,
+          markets: markets.map((market) => ({
+            id: market.id,
+            slug: market.slug,
+            question: market.question,
+            yesPrice: market.yesPrice,
+            noPrice: market.noPrice,
+            volume24hr: market.volume24hr,
+            url: market.url ?? null,
+          })),
+        },
+      }),
+    );
+  }, [channel.id, markets]);
 
   useEffect(() => {
     onActiveMarketChange?.(active);
@@ -85,7 +118,10 @@ export function PolymarketBroadcast({
       </div>
 
       {active ? (
-        <article className="pointer-events-none absolute left-6 top-24 z-10 max-w-md rounded-3xl border border-accent-green/25 bg-black/55 p-5 shadow-2xl shadow-black/40 backdrop-blur-md sm:left-8 sm:top-28 sm:max-w-lg">
+        <article
+          key={active.id}
+          className="scene-story-in pointer-events-none absolute left-6 top-24 z-10 max-w-md rounded-3xl border border-accent-green/25 bg-black/55 p-5 shadow-2xl shadow-black/40 backdrop-blur-md sm:left-8 sm:top-28 sm:max-w-lg"
+        >
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-accent-green">
             <span>Polymarket</span>
             <span className="text-white/35">·</span>
@@ -118,6 +154,66 @@ export function PolymarketBroadcast({
       )}
     </div>
   );
+}
+
+function readChannelPolymarketMarkets(channel: Channel): PolymarketMarket[] {
+  const sourceRef = channel.spec.playout?.sourceRef ?? "polymarket";
+  const source =
+    channel.dataSourcesData.find((item) => item.sourceId === sourceRef && !item.error) ??
+    channel.dataSourcesData.find((item) => item.sourceType.includes("polymarket") && !item.error) ??
+    null;
+  const items = readPayloadItems(source?.data);
+  return items
+    .map((item) => normalizeChannelMarket(item))
+    .filter((item): item is PolymarketMarket => Boolean(item));
+}
+
+function readPayloadItems(payload: unknown): unknown[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const items = (payload as { items?: unknown }).items;
+  return Array.isArray(items) ? items : [];
+}
+
+function normalizeChannelMarket(value: unknown): PolymarketMarket | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const title = readString(record.title) || readString(record.question) || readString(record.name);
+  if (!title) return null;
+
+  const outcomes = Array.isArray(record.outcomes) ? record.outcomes.map(String) : [];
+  const outcomePrices = Array.isArray(record.outcomePrices)
+    ? record.outcomePrices.map((price) => toNumberOrNull(price))
+    : [];
+  const yesIdx = Math.max(
+    0,
+    outcomes.findIndex((outcome) => outcome.toLowerCase() === "yes"),
+  );
+  const yesProb =
+    toNumberOrNull(record.yesProb) ??
+    toNumberOrNull(record.yesPrice) ??
+    outcomePrices[yesIdx] ??
+    null;
+  const clobTokenIds = Array.isArray(record.clobTokenIds)
+    ? record.clobTokenIds.map(String)
+    : [];
+  const id = readString(record.id) || readString(record.slug) || title;
+  const slug = readString(record.marketSlug) || readString(record.slug) || id;
+
+  return {
+    id,
+    slug,
+    question: readString(record.question) || title,
+    image: readString(record.image) || readString(record.icon) || null,
+    yesPrice: yesProb,
+    noPrice: yesProb === null ? null : Math.max(0, Math.min(1, 1 - yesProb)),
+    yesTokenId: clobTokenIds[yesIdx] ?? clobTokenIds[0] ?? null,
+    volume24hr: toNumberOrNull(record.volume24h) ?? toNumberOrNull(record.volume24hr),
+    url: readString(record.url) || null,
+  };
+}
+
+function marketMatchesNarrationId(market: PolymarketMarket, id: string): boolean {
+  return market.id === id || market.slug === id;
 }
 
 function MarketBackdrop({ market }: { market: PolymarketMarket | null }) {
@@ -401,6 +497,7 @@ function normalizeMarket(value: unknown): PolymarketMarket | null {
     noPrice,
     yesTokenId,
     volume24hr: toNumberOrNull(record.volume24hr),
+    url: slug ? `https://polymarket.com/market/${slug}` : null,
   };
 }
 
@@ -434,6 +531,10 @@ function parseJsonString(value: unknown): unknown {
   } catch {
     return null;
   }
+}
+
+function readString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function toNumberOrNull(value: unknown): number | null {

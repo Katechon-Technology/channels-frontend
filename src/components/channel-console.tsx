@@ -80,6 +80,21 @@ type BroadcastItem = {
   kicker: string;
 };
 
+type PolymarketMarketEventDetail = {
+  channelId?: unknown;
+  markets?: unknown;
+};
+
+type PolymarketClientMarket = {
+  id: string;
+  slug?: string;
+  question: string;
+  yesPrice: number | null;
+  noPrice?: number | null;
+  volume24hr?: number | null;
+  url?: string | null;
+};
+
 type ShareSnapshot = {
   createdAt: number;
   channel: Channel;
@@ -227,6 +242,9 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   const [agentBusy, setAgentBusy] = useState(false);
   const [flushingNarration, setFlushingNarration] = useState(false);
   const [activeNarrationId, setActiveNarrationId] = useState<string | null>(null);
+  const [clientMarketItemsByChannel, setClientMarketItemsByChannel] = useState<
+    Record<string, BroadcastItem[]>
+  >({});
   const directorBusyRef = useRef(false);
   const narrationRequestPendingRef = useRef(false);
   const narrationChannelRef = useRef<string | null>(null);
@@ -240,10 +258,17 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   );
   const playout = active?.spec.playout;
   const durationSeconds = clampNumber(playout?.itemDurationSeconds ?? 10, 3, 300);
-  const items = useMemo(() => (active ? extractBroadcastItems(active) : []), [active]);
+  const activeChannelId = active?.id ?? null;
+  const storedItems = useMemo(() => (active ? extractBroadcastItems(active) : []), [active]);
+  const items = useMemo(() => {
+    if (active?.spec.channelType === "polymarket" && activeChannelId) {
+      const clientItems = clientMarketItemsByChannel[activeChannelId] ?? [];
+      if (clientItems.length > 0) return clientItems;
+    }
+    return storedItems;
+  }, [active?.spec.channelType, activeChannelId, clientMarketItemsByChannel, storedItems]);
   const itemKey = useMemo(() => itemsFingerprint(items), [items]);
   const currentItem = items.length ? items[playIndex % items.length] : null;
-  const activeChannelId = active?.id ?? null;
   const activeNarrationMessages = active?.narrationMessages;
   const orderedNarrations = useMemo(
     () => orderNarrationMessages(activeNarrationMessages),
@@ -320,6 +345,25 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
     if (!auth.ready || !auth.authenticated) return;
     void refresh({ autoTune: true });
   }, [auth.ready, auth.authenticated, refresh]);
+
+  useEffect(() => {
+    function onPolymarketMarkets(event: Event) {
+      const detail = (event as CustomEvent<PolymarketMarketEventDetail>).detail;
+      const channelId = typeof detail?.channelId === "string" ? detail.channelId : null;
+      if (!channelId || !Array.isArray(detail.markets)) return;
+      const items = detail.markets
+        .map((market, index) => normalizePolymarketClientMarket(market, index))
+        .filter((item): item is BroadcastItem => Boolean(item));
+      setClientMarketItemsByChannel((current) => {
+        const previous = current[channelId] ?? [];
+        if (itemsFingerprint(previous) === itemsFingerprint(items)) return current;
+        return { ...current, [channelId]: items };
+      });
+    }
+
+    window.addEventListener("katechon:polymarket-markets", onPolymarketMarkets);
+    return () => window.removeEventListener("katechon:polymarket-markets", onPolymarketMarkets);
+  }, []);
 
   useEffect(() => {
     if (!auth.ready || !auth.authenticated || !activeChannelId) return;
@@ -498,12 +542,19 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
       return;
     }
 
-    if (activeNarrationId && orderedNarrations.some((message) => message.id === activeNarrationId)) {
+    const hasActiveNarration =
+      !!activeNarrationId && orderedNarrations.some((message) => message.id === activeNarrationId);
+    if (
+      activeNarrationId &&
+      hasActiveNarration &&
+      !playedNarrationIdsRef.current.has(activeNarrationId)
+    ) {
       return;
     }
 
     const next = nextQueuedNarration(orderedNarrations, playedNarrationIdsRef.current);
     if (next) setActiveNarrationId(next.id);
+    else if (!hasActiveNarration) setActiveNarrationId(null);
   }, [activeChannelId, activeNarrationId, latestKnownNarration?.id, orderedNarrations]);
 
   useEffect(() => {
@@ -558,7 +609,6 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
         return;
       }
 
-      setActiveNarrationId(null);
       if (!agentDriven) return;
 
       const chosenId = latestScene?.chosenItemId ?? latestNarration.metadata?.chosenItemId;
@@ -846,6 +896,7 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
               presetOptions={focusOptionsForChannel(active)}
               suggestedActions={active.suggestedActions ?? []}
               narration={latestNarration}
+              narrationDriven={agentDriven}
               scene={latestScene}
               pendingFocusLabel={pendingFocus?.channelId === active.id ? pendingFocus.label : null}
               onChoosePreset={choosePreset}
@@ -1161,6 +1212,7 @@ function BroadcastStage({
   presetOptions,
   suggestedActions,
   narration,
+  narrationDriven,
   scene,
   pendingFocusLabel,
   onChoosePreset,
@@ -1170,6 +1222,7 @@ function BroadcastStage({
   presetOptions: FocusOption[];
   suggestedActions: ChannelSuggestedAction[];
   narration?: ChannelNarrationMessage | null;
+  narrationDriven?: boolean;
   scene?: ChannelNarrationMessage["scene"] | null;
   pendingFocusLabel: string | null;
   onChoosePreset: (option: FocusOption) => void;
@@ -1179,7 +1232,12 @@ function BroadcastStage({
     <div className="boot-in flex min-h-[calc(100vh-32px)] flex-col gap-4">
       <section className="grid flex-1 gap-4">
         <div className="katechon-stage relative min-h-[calc(100vh-64px)] overflow-hidden rounded-[30px] border border-white/10 bg-black matrix-scanline">
-          <ChannelGrid channel={channel} narration={narration} scene={scene} />
+          <ChannelGrid
+            channel={channel}
+            narration={narration}
+            narrationDriven={narrationDriven}
+            scene={scene}
+          />
           <FocusSwitcher
             presets={presetOptions}
             suggested={suggestedActions}
@@ -1405,7 +1463,11 @@ function normalizeBroadcastItem(
   const item = value as Record<string, unknown>;
   const title = readString(item.title) || readString(item.question) || readString(item.name);
   if (!title) return null;
-  const summary = readString(item.summary) || readString(item.description) || readString(item.text);
+  const summary =
+    readString(item.summary) ||
+    readString(item.description) ||
+    readString(item.text) ||
+    predictionMarketSummary(item);
   const feed = readString(item.feed) || readString(item.source) || source?.sourceId || "source";
   const link = readString(item.link) || readString(item.url);
   const published = readString(item.published) || readString(item.publishedAt) || null;
@@ -1420,8 +1482,78 @@ function normalizeBroadcastItem(
   };
 }
 
+function normalizePolymarketClientMarket(
+  value: unknown,
+  index: number,
+): BroadcastItem | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const market = value as Partial<PolymarketClientMarket>;
+  const title = typeof market.question === "string" ? market.question.trim() : "";
+  if (!title) return null;
+  const id =
+    (typeof market.id === "string" && market.id.trim()) ||
+    (typeof market.slug === "string" && market.slug.trim()) ||
+    `polymarket-${index}`;
+  const summaryParts: string[] = [];
+  if (typeof market.yesPrice === "number" && Number.isFinite(market.yesPrice)) {
+    summaryParts.push(`YES is priced around ${Math.round(market.yesPrice * 100)}%.`);
+  }
+  if (typeof market.volume24hr === "number" && Number.isFinite(market.volume24hr)) {
+    summaryParts.push(`24 hour volume is about ${formatCompactCurrency(market.volume24hr)}.`);
+  }
+  return {
+    id,
+    title,
+    summary: summaryParts.join(" "),
+    source: "polymarket",
+    published: null,
+    link: typeof market.url === "string" ? market.url : "",
+    kicker: "prediction-market",
+  };
+}
+
 function readString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function predictionMarketSummary(item: Record<string, unknown>): string {
+  const yes =
+    readNumberValue(item.yesProb) ??
+    readNumberValue(item.yesPrice) ??
+    readOutcomePrice(item, "yes");
+  const volume = readNumberValue(item.volume24h) ?? readNumberValue(item.volume24hr);
+  const parts: string[] = [];
+  if (yes !== null) parts.push(`YES is priced around ${Math.round(yes * 100)}%.`);
+  if (volume !== null && volume > 0) {
+    parts.push(`24 hour volume is about ${formatCompactCurrency(volume)}.`);
+  }
+  return parts.join(" ");
+}
+
+function readOutcomePrice(item: Record<string, unknown>, outcome: string): number | null {
+  const outcomes = Array.isArray(item.outcomes) ? item.outcomes.map((value) => String(value)) : [];
+  const prices = Array.isArray(item.outcomePrices) ? item.outcomePrices : [];
+  const index = outcomes.findIndex((value) => value.toLowerCase() === outcome);
+  if (index < 0) return null;
+  return readNumberValue(prices[index]);
+}
+
+function readNumberValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function formatCompactCurrency(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+    style: "currency",
+    currency: "USD",
+  }).format(value);
 }
 
 function speechTextForItem(item: BroadcastItem): string {

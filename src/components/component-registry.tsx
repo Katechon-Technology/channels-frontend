@@ -12,6 +12,7 @@ export interface RegionComponentProps {
   region: ChannelRegion;
   channel: Channel;
   narration?: ChannelNarrationMessage | null;
+  narrationDriven?: boolean;
   scene?: ChannelScene | null;
 }
 

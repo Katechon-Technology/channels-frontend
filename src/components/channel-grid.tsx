@@ -18,10 +18,16 @@ import { resolveRegionComponent } from "./component-registry";
 interface ChannelGridProps {
   channel: Channel;
   narration?: ChannelNarrationMessage | null;
+  narrationDriven?: boolean;
   scene?: ChannelScene | null;
 }
 
-export function ChannelGrid({ channel, narration, scene }: ChannelGridProps) {
+export function ChannelGrid({
+  channel,
+  narration,
+  narrationDriven = false,
+  scene,
+}: ChannelGridProps) {
   const ui = channel.spec.ui;
   const preset = getGridPreset(ui.gridTemplate);
   if (!preset) {
@@ -37,16 +43,33 @@ export function ChannelGrid({ channel, narration, scene }: ChannelGridProps) {
 
   return (
     <div className="relative h-full w-full overflow-hidden">
-      {bg ? <LayerBg region={bg} channel={channel} narration={narration} scene={scene} /> : null}
+      {bg ? (
+        <LayerBg
+          region={bg}
+          channel={channel}
+          narration={narration}
+          narrationDriven={narrationDriven}
+          scene={scene}
+        />
+      ) : null}
       <GridSurface
         preset={preset}
         regions={ui.regions}
         channel={channel}
         narration={narration}
+        narrationDriven={narrationDriven}
         scene={scene}
         gap={ui.gap}
       />
-      {fg ? <LayerFg region={fg} channel={channel} narration={narration} scene={scene} /> : null}
+      {fg ? (
+        <LayerFg
+          region={fg}
+          channel={channel}
+          narration={narration}
+          narrationDriven={narrationDriven}
+          scene={scene}
+        />
+      ) : null}
       <SceneOverlay scene={scene} sceneKey={narration?.id ?? null} />
     </div>
   );
@@ -101,6 +124,7 @@ function GridSurface({
   regions,
   channel,
   narration,
+  narrationDriven,
   scene,
   gap,
 }: {
@@ -108,6 +132,7 @@ function GridSurface({
   regions: Record<string, ChannelRegion>;
   channel: Channel;
   narration?: ChannelNarrationMessage | null;
+  narrationDriven?: boolean;
   scene?: ChannelScene | null;
   gap?: string;
 }) {
@@ -137,6 +162,7 @@ function GridSurface({
               region={region}
               channel={channel}
               narration={narration}
+              narrationDriven={narrationDriven}
               scene={scene}
             />
           );
@@ -150,12 +176,14 @@ function RegionSlot({
   region,
   channel,
   narration,
+  narrationDriven,
   scene,
 }: {
   area: GridPresetArea;
   region: ChannelRegion;
   channel: Channel;
   narration?: ChannelNarrationMessage | null;
+  narrationDriven?: boolean;
   scene?: ChannelScene | null;
 }) {
   const resolved = resolveRegionComponent(region.component);
@@ -175,7 +203,7 @@ function RegionSlot({
   return (
     <div style={containerStyle}>
       <Suspense fallback={<RegionFallback />}>
-        {createElement(resolved, { region, channel, narration, scene })}
+        {createElement(resolved, { region, channel, narration, narrationDriven, scene })}
       </Suspense>
     </div>
   );
@@ -185,18 +213,22 @@ function LayerBg({
   region,
   channel,
   narration,
+  narrationDriven,
   scene,
 }: {
   region: ChannelRegion;
   channel: Channel;
   narration?: ChannelNarrationMessage | null;
+  narrationDriven?: boolean;
   scene?: ChannelScene | null;
 }) {
   const resolved = resolveRegionComponent(region.component);
   if (!resolved) return null;
   return (
     <div className="pointer-events-none absolute inset-0 z-0">
-      <Suspense fallback={null}>{createElement(resolved, { region, channel, narration, scene })}</Suspense>
+      <Suspense fallback={null}>
+        {createElement(resolved, { region, channel, narration, narrationDriven, scene })}
+      </Suspense>
     </div>
   );
 }
@@ -205,18 +237,22 @@ function LayerFg({
   region,
   channel,
   narration,
+  narrationDriven,
   scene,
 }: {
   region: ChannelRegion;
   channel: Channel;
   narration?: ChannelNarrationMessage | null;
+  narrationDriven?: boolean;
   scene?: ChannelScene | null;
 }) {
   const resolved = resolveRegionComponent(region.component);
   if (!resolved) return null;
   return (
     <div className="pointer-events-none absolute inset-0 z-50">
-      <Suspense fallback={null}>{createElement(resolved, { region, channel, narration, scene })}</Suspense>
+      <Suspense fallback={null}>
+        {createElement(resolved, { region, channel, narration, narrationDriven, scene })}
+      </Suspense>
     </div>
   );
 }
