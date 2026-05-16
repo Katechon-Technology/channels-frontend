@@ -9,13 +9,23 @@ import {
   type LineData,
   type UTCTimestamp,
 } from "lightweight-charts";
-import type { Channel } from "@/lib/types";
+import type { Channel, ChannelNarrationMessage } from "@/lib/types";
 
 type Timeframe = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
 type Candle = { time: number; open: number; high: number; low: number; close: number; volume: number };
 type OrderbookLevel = { price: number; size: number };
 type Orderbook = { bids: OrderbookLevel[]; asks: OrderbookLevel[] };
 type DataStatus = "connecting" | "live" | "error";
+type HyperliquidMarketSummary = {
+  symbol: string;
+  last: number | null;
+  changePct: number | null;
+  funding: number | null;
+  openInterest: number | null;
+  dayVolume: number | null;
+  oraclePrice: number | null;
+  summary: string;
+};
 
 const INFO_URL = "https://api.hyperliquid.xyz/info";
 const WS_URL = "wss://api.hyperliquid.xyz/ws";
@@ -30,8 +40,23 @@ const intervalMs: Record<Timeframe, number> = {
   "1d": 86_400_000,
 };
 
-export function HyperliquidBroadcast({ channel }: { channel: Channel }) {
-  const { market, timeframe } = readMarketConfig(channel);
+export function HyperliquidBroadcast({
+  channel,
+  narration,
+  narrationDriven = false,
+}: {
+  channel: Channel;
+  narration?: ChannelNarrationMessage | null;
+  narrationDriven?: boolean;
+}) {
+  const { market: configuredMarket, timeframe, limit } = readMarketConfig(channel);
+  const { data: topMarkets } = useTopMarkets(limit);
+  const chosenMarketId = narration?.scene?.chosenItemId ?? narration?.metadata?.chosenItemId;
+  const selectedMarket = chosenMarketId
+    ? topMarkets.find((item) => marketMatchesNarrationId(item.symbol, chosenMarketId)) ?? null
+    : null;
+  const shouldUseNarrationMarket = narrationDriven || Boolean(narration);
+  const market = shouldUseNarrationMarket && selectedMarket ? selectedMarket.symbol : configuredMarket;
   const { data: candles } = useCandles(market, timeframe, 220);
   const { data: book } = useOrderbook(market, 14);
   const { data: funding } = useFunding(market);
@@ -42,6 +67,28 @@ export function HyperliquidBroadcast({ channel }: { channel: Channel }) {
   const changePct = last && prev && prev.close !== 0 ? (change! / prev.close) * 100 : undefined;
   const positive = (change ?? 0) >= 0;
 
+  useEffect(() => {
+    if (topMarkets.length === 0) return;
+    window.dispatchEvent(
+      new CustomEvent("katechon:hyperliquid-markets", {
+        detail: {
+          channelId: channel.id,
+          markets: topMarkets.map((item) => ({
+            symbol: item.symbol,
+            last: item.last,
+            changePct: item.changePct,
+            funding: item.funding,
+            openInterest: item.openInterest,
+            dayVolume: item.dayVolume,
+            oraclePrice: item.oraclePrice,
+            summary: item.summary,
+            url: `https://app.hyperliquid.xyz/trade/${item.symbol}`,
+          })),
+        },
+      }),
+    );
+  }, [channel.id, topMarkets]);
+
   return (
     <div className="relative flex h-full min-h-[calc(100vh-64px)] flex-col p-5 pt-20 sm:p-8 sm:pt-24 lg:p-10 lg:pt-28">
       <div className="pointer-events-none absolute left-6 right-6 top-6 z-10 flex items-start justify-between gap-6 text-[10px] uppercase tracking-[0.2em] text-white/45 sm:left-8 sm:right-8 sm:top-8">
@@ -51,7 +98,10 @@ export function HyperliquidBroadcast({ channel }: { channel: Channel }) {
 
       <section className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
         <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-4">
-          <article className="rounded-[24px] border border-white/10 bg-black/35 px-5 py-4 shadow-2xl shadow-black/25 backdrop-blur">
+          <article
+            key={market}
+            className="scene-story-in rounded-[24px] border border-white/10 bg-black/35 px-5 py-4 shadow-2xl shadow-black/25 backdrop-blur"
+          >
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div className="min-w-0">
                 <div className="mb-1 text-[10px] uppercase tracking-[0.18em] text-accent-blue">Market watch</div>
@@ -92,6 +142,7 @@ export function HyperliquidBroadcast({ channel }: { channel: Channel }) {
 
         <aside className="grid content-start gap-4 pb-[34vh] lg:pb-[38vh]">
           <OrderbookCard book={book} />
+          <TopMarketsCard markets={topMarkets} activeSymbol={market} />
         </aside>
       </section>
     </div>
@@ -175,6 +226,154 @@ function OrderbookCard({ book }: { book: Orderbook }) {
       </div>
     </article>
   );
+}
+
+function TopMarketsCard({
+  markets,
+  activeSymbol,
+}: {
+  markets: HyperliquidMarketSummary[];
+  activeSymbol: string;
+}) {
+  if (markets.length === 0) return null;
+  return (
+    <article className="rounded-[26px] border border-white/10 bg-black/35 p-4 backdrop-blur">
+      <div className="mb-3 text-xs uppercase tracking-[0.18em] text-white/40">Top perps</div>
+      <div className="grid gap-2">
+        {markets.slice(0, 6).map((market) => {
+          const active = market.symbol === activeSymbol;
+          const positive = (market.changePct ?? 0) >= 0;
+          return (
+            <div
+              key={market.symbol}
+              className={`grid grid-cols-[minmax(0,1fr)_auto] gap-2 rounded-xl border px-3 py-2 text-xs ${
+                active
+                  ? "border-accent-green/30 bg-accent-green/10"
+                  : "border-white/8 bg-white/[0.03]"
+              }`}
+            >
+              <div className="min-w-0">
+                <div className="truncate font-bold text-white">{market.symbol}-PERP</div>
+                <div className="mt-0.5 text-white/40">{formatCompactCurrency(market.dayVolume)} 24h</div>
+              </div>
+              <div className="text-right">
+                <div className="font-bold text-white">{formatPrice(market.last ?? undefined)}</div>
+                <div className={positive ? "text-accent-green" : "text-red-300"}>
+                  {market.changePct === null
+                    ? "—"
+                    : `${positive ? "+" : ""}${market.changePct.toFixed(2)}%`}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </article>
+  );
+}
+
+function useTopMarkets(limit: number) {
+  const [state, setState] = useState<{ data: HyperliquidMarketSummary[]; status: DataStatus }>({
+    data: [],
+    status: "connecting",
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetchTopMarkets(limit)
+        .then((data) => !cancelled && setState({ data, status: "live" }))
+        .catch(() => !cancelled && setState({ data: [], status: "error" }));
+    };
+    setState((prev) => ({ ...prev, status: "connecting" }));
+    load();
+    const id = window.setInterval(load, 45_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [limit]);
+
+  return state;
+}
+
+async function fetchTopMarkets(limit: number): Promise<HyperliquidMarketSummary[]> {
+  const [meta, contexts] = await postInfo<
+    [
+      { universe: Array<{ name: string }> },
+      Array<Record<string, unknown>>,
+    ]
+  >({ type: "metaAndAssetCtxs" });
+
+  return meta.universe
+    .map((asset, index) => normalizeMarketSummary(asset.name, contexts[index] ?? {}))
+    .filter((market): market is HyperliquidMarketSummary => Boolean(market))
+    .sort((a, b) => (b.dayVolume ?? 0) - (a.dayVolume ?? 0))
+    .slice(0, limit);
+}
+
+function marketMatchesNarrationId(symbol: string, id: string): boolean {
+  return normalizeCoin(symbol) === normalizeCoin(id);
+}
+
+function normalizeMarketSummary(
+  symbol: string,
+  context: Record<string, unknown>,
+): HyperliquidMarketSummary | null {
+  const normalized = normalizeCoin(symbol);
+  if (!normalized) return null;
+  const last = numberOrNull(context.markPx ?? context.midPx ?? context.oraclePx);
+  const prevDay = numberOrNull(context.prevDayPx);
+  const oraclePrice = numberOrNull(context.oraclePx);
+  const dayVolume = numberOrNull(context.dayNtlVlm);
+  const funding = numberOrNull(context.funding);
+  const openInterest = numberOrNull(context.openInterest);
+  const changePct =
+    last !== null && prevDay !== null && prevDay !== 0
+      ? ((last - prevDay) / prevDay) * 100
+      : null;
+
+  return {
+    symbol: normalized,
+    last,
+    changePct,
+    funding,
+    openInterest,
+    dayVolume,
+    oraclePrice,
+    summary: buildMarketSummary({
+      symbol: normalized,
+      last,
+      changePct,
+      funding,
+      openInterest,
+      dayVolume,
+      oraclePrice,
+      summary: "",
+    }),
+  };
+}
+
+function buildMarketSummary(market: HyperliquidMarketSummary): string {
+  const parts: string[] = [];
+  if (market.last !== null) parts.push(`${market.symbol}-PERP trades near $${formatPrice(market.last)}.`);
+  if (market.changePct !== null) {
+    parts.push(`It is ${market.changePct >= 0 ? "up" : "down"} ${Math.abs(market.changePct).toFixed(2)}% over 24 hours.`);
+  }
+  if (market.funding !== null) parts.push(`Funding is ${(market.funding * 100).toFixed(4)}%.`);
+  if (market.openInterest !== null) {
+    parts.push(`Open interest is about ${formatCompactCurrency(market.openInterest)}.`);
+  }
+  if (market.dayVolume !== null) {
+    parts.push(`24 hour notional volume is about ${formatCompactCurrency(market.dayVolume)}.`);
+  }
+  if (market.oraclePrice !== null && market.last !== null && market.oraclePrice !== 0) {
+    const premiumPct = ((market.last - market.oraclePrice) / market.oraclePrice) * 100;
+    if (Number.isFinite(premiumPct) && Math.abs(premiumPct) >= 0.05) {
+      parts.push(`The perp is trading ${premiumPct >= 0 ? "above" : "below"} oracle by ${Math.abs(premiumPct).toFixed(2)}%.`);
+    }
+  }
+  return parts.join(" ");
 }
 
 function useCandles(market: string, timeframe: Timeframe, count = 200) {
@@ -317,11 +516,16 @@ function readIndicators(channel: Channel): Array<{ type: string; period?: number
   return [];
 }
 
-function readMarketConfig(channel: Channel): { market: string; timeframe: Timeframe } {
+function readMarketConfig(channel: Channel): { market: string; timeframe: Timeframe; limit: number } {
   const hyperliquid = channel.spec.dataSources.find((item) => item.id === "hyperliquid") ?? channel.spec.dataSources[0];
   const selected = stringify(hyperliquid?.constraints.selectedMarket ?? "BTC").replace(/-PERP$/i, "").toUpperCase();
   const timeframe = normalizeTimeframe(stringify(hyperliquid?.constraints.timeframe ?? "5m"));
-  return { market: selected || "BTC", timeframe };
+  const rawLimit =
+    typeof hyperliquid?.constraints.limit === "number"
+      ? hyperliquid.constraints.limit
+      : channel.spec.playout?.limit ?? 10;
+  const limit = Math.min(30, Math.max(3, Math.round(rawLimit)));
+  return { market: selected || "BTC", timeframe, limit };
 }
 
 function normalizeTimeframe(value: string): Timeframe {
@@ -332,11 +536,30 @@ function normalizeCoin(market: string) {
   return market.toUpperCase().replace(/-PERP$/, "");
 }
 
+function numberOrNull(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 function formatPrice(value?: number) {
   if (value === undefined || Number.isNaN(value)) return "—";
   return value >= 1000
     ? value.toLocaleString(undefined, { maximumFractionDigits: 1 })
     : value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+function formatCompactCurrency(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+    style: "currency",
+    currency: "USD",
+  }).format(value);
 }
 
 function stringify(value: unknown): string {

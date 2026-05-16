@@ -95,6 +95,18 @@ type PolymarketClientMarket = {
   url?: string | null;
 };
 
+type HyperliquidClientMarket = {
+  symbol?: string;
+  last?: number | null;
+  changePct?: number | null;
+  funding?: number | null;
+  openInterest?: number | null;
+  dayVolume?: number | null;
+  oraclePrice?: number | null;
+  summary?: string;
+  url?: string | null;
+};
+
 type ShareSnapshot = {
   createdAt: number;
   channel: Channel;
@@ -261,7 +273,10 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   const activeChannelId = active?.id ?? null;
   const storedItems = useMemo(() => (active ? extractBroadcastItems(active) : []), [active]);
   const items = useMemo(() => {
-    if (active?.spec.channelType === "polymarket" && activeChannelId) {
+    if (
+      (active?.spec.channelType === "polymarket" || active?.spec.channelType === "hyperliquid") &&
+      activeChannelId
+    ) {
       const clientItems = clientMarketItemsByChannel[activeChannelId] ?? [];
       if (clientItems.length > 0) return clientItems;
     }
@@ -347,6 +362,14 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
   }, [auth.ready, auth.authenticated, refresh]);
 
   useEffect(() => {
+    function updateClientItems(channelId: string, items: BroadcastItem[]) {
+      setClientMarketItemsByChannel((current) => {
+        const previous = current[channelId] ?? [];
+        if (itemsContentFingerprint(previous) === itemsContentFingerprint(items)) return current;
+        return { ...current, [channelId]: items };
+      });
+    }
+
     function onPolymarketMarkets(event: Event) {
       const detail = (event as CustomEvent<PolymarketMarketEventDetail>).detail;
       const channelId = typeof detail?.channelId === "string" ? detail.channelId : null;
@@ -354,15 +377,25 @@ function ChannelConsoleInner({ auth }: { auth: AuthSession }) {
       const items = detail.markets
         .map((market, index) => normalizePolymarketClientMarket(market, index))
         .filter((item): item is BroadcastItem => Boolean(item));
-      setClientMarketItemsByChannel((current) => {
-        const previous = current[channelId] ?? [];
-        if (itemsFingerprint(previous) === itemsFingerprint(items)) return current;
-        return { ...current, [channelId]: items };
-      });
+      updateClientItems(channelId, items);
+    }
+
+    function onHyperliquidMarkets(event: Event) {
+      const detail = (event as CustomEvent<PolymarketMarketEventDetail>).detail;
+      const channelId = typeof detail?.channelId === "string" ? detail.channelId : null;
+      if (!channelId || !Array.isArray(detail.markets)) return;
+      const items = detail.markets
+        .map((market, index) => normalizeHyperliquidClientMarket(market, index))
+        .filter((item): item is BroadcastItem => Boolean(item));
+      updateClientItems(channelId, items);
     }
 
     window.addEventListener("katechon:polymarket-markets", onPolymarketMarkets);
-    return () => window.removeEventListener("katechon:polymarket-markets", onPolymarketMarkets);
+    window.addEventListener("katechon:hyperliquid-markets", onHyperliquidMarkets);
+    return () => {
+      window.removeEventListener("katechon:polymarket-markets", onPolymarketMarkets);
+      window.removeEventListener("katechon:hyperliquid-markets", onHyperliquidMarkets);
+    };
   }, []);
 
   useEffect(() => {
@@ -1512,6 +1545,49 @@ function normalizePolymarketClientMarket(
   };
 }
 
+function normalizeHyperliquidClientMarket(
+  value: unknown,
+  index: number,
+): BroadcastItem | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const market = value as Partial<HyperliquidClientMarket>;
+  const symbol = typeof market.symbol === "string" ? market.symbol.trim().toUpperCase() : "";
+  if (!symbol) return null;
+  const summary = readString(market.summary) || hyperliquidClientSummary(market, symbol);
+  return {
+    id: symbol || `hyperliquid-${index}`,
+    title: `${symbol}-PERP`,
+    summary,
+    source: "hyperliquid",
+    published: null,
+    link: typeof market.url === "string" ? market.url : "",
+    kicker: "perp-market",
+  };
+}
+
+function hyperliquidClientSummary(
+  market: Partial<HyperliquidClientMarket>,
+  symbol: string,
+): string {
+  const parts: string[] = [];
+  if (typeof market.last === "number" && Number.isFinite(market.last)) {
+    parts.push(`${symbol}-PERP trades near $${formatMarketNumber(market.last)}.`);
+  }
+  if (typeof market.changePct === "number" && Number.isFinite(market.changePct)) {
+    parts.push(`It is ${market.changePct >= 0 ? "up" : "down"} ${Math.abs(market.changePct).toFixed(2)}% over 24 hours.`);
+  }
+  if (typeof market.funding === "number" && Number.isFinite(market.funding)) {
+    parts.push(`Funding is ${(market.funding * 100).toFixed(4)}%.`);
+  }
+  if (typeof market.openInterest === "number" && Number.isFinite(market.openInterest)) {
+    parts.push(`Open interest is about ${formatCompactCurrency(market.openInterest)}.`);
+  }
+  if (typeof market.dayVolume === "number" && Number.isFinite(market.dayVolume)) {
+    parts.push(`24 hour notional volume is about ${formatCompactCurrency(market.dayVolume)}.`);
+  }
+  return parts.join(" ");
+}
+
 function readString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -1554,6 +1630,12 @@ function formatCompactCurrency(value: number): string {
     style: "currency",
     currency: "USD",
   }).format(value);
+}
+
+function formatMarketNumber(value: number): string {
+  return value >= 1000
+    ? value.toLocaleString(undefined, { maximumFractionDigits: 1 })
+    : value.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
 function speechTextForItem(item: BroadcastItem): string {
@@ -1637,6 +1719,13 @@ function itemsFingerprint(items: BroadcastItem[]): string {
   return items
     .slice(0, 8)
     .map((item) => item.id)
+    .join("|");
+}
+
+function itemsContentFingerprint(items: BroadcastItem[]): string {
+  return items
+    .slice(0, 12)
+    .map((item) => `${item.id}:${item.summary}`)
     .join("|");
 }
 
